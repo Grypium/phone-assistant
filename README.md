@@ -64,7 +64,7 @@ claude          # sign in when it asks (it prints a URL to open in the browser)
 ### Step 3: let Claude set up the rest
 ```bash
 pkg install -y git
-git clone <this repo's URL> ~/phone-assistant
+git clone https://github.com/Grypium/phone-assistant ~/phone-assistant
 cd ~ && claude
 ```
 Then tell Claude: **"read ~/phone-assistant/CLAUDE.md and set it up"**. It runs `./install.sh`, walks you through ADB
