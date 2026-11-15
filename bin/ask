@@ -59,6 +59,7 @@ for turn in 1 2 3 4 5 6; do
     [ -z "$text" ] && { status "Ready"; [ $turn = 1 ] && termux-vibrate -d 40 >/dev/null 2>&1; exit 0; }
   fi
   log "YOU: $text"; status "💭 $text"
+  rm -f "$S/wake-followup"
   printf '%s' "$text" | "$P/bin/claude-stream" "$REPLY_FILE" -- timeout 180 claude -p --model "$MODEL" "${sess[@]}" \
       --append-system-prompt "$(cat "$P/ASSISTANT.md" "$P/ASSISTANT.local.md" 2>/dev/null)" \
       --allowedTools "Bash,Read,Write,Edit,Glob,Grep,WebSearch,WebFetch" 2>>"$L/claude-errors.log" |
@@ -74,9 +75,21 @@ for turn in 1 2 3 4 5 6; do
   if [ -z "$reply" ] && [ "$crc" = 0 ] && [ "$rc" = 0 ]; then   # nothing to say (<silent>): just a buzz
     log "CLAUDE: (silent)"; timeout 5 termux-vibrate -d 60 >/dev/null 2>&1 9>&- & break
   fi
-  log "CLAUDE: $reply"; status "🗣 $reply"
+  if [ -z "$reply" ] && { [ "$rc" = 10 ] || [ "$rc" = 11 ]; }; then log "CLAUDE: (stopped before replying)"
+  else log "CLAUDE: $reply"; status "🗣 $reply"; fi
   [ $rc = 10 ] && { status "Stopped"; break; }   # you said "stop"
-  [ $rc = 11 ] && { text=""; continue; }         # you said the wake word over it: listen for the new request
+  if [ $rc = 11 ]; then   # you said the wake word over it. Same breath: "Hey Jarvis, stop" or a new request
+    if [ -f "$S/wake.pid" ] && kill -0 "$(cat "$S/wake.pid")" 2>/dev/null; then
+      for _ in $(seq 1 250); do [ -f "$S/wake-followup" ] && break; sleep 0.1; done   # the listener records it
+      f=$(cat "$S/wake-followup" 2>/dev/null); rm -f "$S/wake-followup"
+      text=""; [ -n "$f" ] && text=$("$P/bin/hear" --file "$f" --strip-wake)
+      if [ -z "$text" ] || "$P/bin/is-stop" "$text"; then
+        log "YOU: ${text:-(wake word only)} -> stopped"; status "Stopped"
+        paplay "$P/assets/stopped.wav" 2>/dev/null; break
+      fi
+    else text=""; fi        # (no always-on listener: listen for the new request)
+    continue
+  fi
   case "$reply" in *\?) text="";; *) break;; esac
 done
 status "Ready"

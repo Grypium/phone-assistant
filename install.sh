@@ -144,7 +144,7 @@ for pair in com.termux.api:termux-api com.termux.widget:termux-widget com.termux
   pk=${pair%%:*}; have_pkg "$pk" && { ok "$pk already installed"; continue; }
   fetch "$pk" "${pair#*:}" && todo+=("$pk")
 done
-API_PERMS="CAMERA ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION RECORD_AUDIO READ_CONTACTS READ_SMS SEND_SMS READ_CALL_LOG READ_PHONE_STATE CALL_PHONE POST_NOTIFICATIONS BODY_SENSORS NEARBY_WIFI_DEVICES"
+API_PERMS="CAMERA ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION ACCESS_BACKGROUND_LOCATION RECORD_AUDIO READ_CONTACTS READ_SMS SEND_SMS READ_CALL_LOG READ_PHONE_STATE CALL_PHONE POST_NOTIFICATIONS BODY_SENSORS NEARBY_WIFI_DEVICES"
 grants="for p in $API_PERMS; do pm grant com.termux.api android.permission.\$p; done; for k in com.termux.api com.termux.boot com.termux.widget; do dumpsys deviceidle whitelist +\$k; am set-standby-bucket \$k active; cmd appops set \$k RUN_ANY_IN_BACKGROUND allow; done"
 if [ ${#todo[@]} -eq 0 ]; then
   have_pkg com.termux.api && $ADB shell "$grants" >/dev/null 2>&1; ok "Termux:API permissions granted"

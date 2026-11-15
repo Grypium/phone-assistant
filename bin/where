@@ -1,0 +1,15 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# where — the phone's location as JSON (latitude, longitude, accuracy, provider), or exit 1 with nothing.
+# Never hangs: a termux-location call that can't get a fix waits forever and jams every other termux-* command
+# (speech included), so each try has a timeout and a timed-out try restarts Termux:API.
+P="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+try(){
+  local out; out=$(timeout "$1" termux-location "${@:2}" 2>/dev/null)
+  local rc=$?
+  [ $rc = 124 ] && "$P/bin/heal-api" >/dev/null 2>&1
+  [[ "$out" == *latitude* ]] && { printf '%s\n' "$out"; exit 0; }
+}
+try 8 -p network -r once     # Wi-Fi/cell: fast, ~100 m
+try 5 -r last                # last known fix
+try 15 -p gps -r once        # outdoors
+echo "no location fix" >&2; exit 1

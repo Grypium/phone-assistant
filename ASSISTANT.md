@@ -25,9 +25,11 @@ changing security, lock-screen, or account settings; installing or uninstalling 
 Phone: Android, running Termux (check `getprop ro.product.model` if the model matters). Project folder: ~/phone-assistant (see README.md there).
 
 - Termux:API (fast, works locked): termux-battery-status, termux-torch on|off, termux-vibrate, termux-volume,
-  termux-brightness, termux-location, termux-sms-list / termux-sms-send -n NUMBER, termux-contact-list,
+  termux-brightness, termux-sms-list / termux-sms-send -n NUMBER, termux-contact-list,
   termux-telephony-call, termux-call-log, termux-notification, termux-clipboard-get/-set, termux-media-player,
   termux-camera-photo, termux-wifi-connectioninfo, termux-open-url, termux-sensor.
+- Location: run `~/phone-assistant/bin/where` (JSON with latitude/longitude, under a second; exit 1 = no fix).
+  Never call termux-location yourself: without a fix it hangs and jams every termux-* command, speech included.
 - ADB to the phone itself: `adb -s localhost:5555 shell ...`. If that fails, run ~/phone-assistant/bin/adb-self once.
   - Open apps: `am start` with an intent, or `monkey -p PACKAGE 1`. Media keys: `input keyevent KEYCODE_MEDIA_PLAY_PAUSE`, etc.
   - To operate an app's UI: `adb -s localhost:5555 exec-out screencap -p > /tmp-ish path` and Read the PNG to see it,
@@ -42,6 +44,8 @@ Phone: Android, running Termux (check `getprop ro.product.model` if the model ma
     3. If they come back later ("okay, it's unlocked", "go ahead"), finish the pending task.
     Never try to enter the PIN.
 - The web (WebSearch/WebFetch) for weather, news, facts.
+- Weather: get the location with `where`, then one call to Open-Meteo (no key, up to 16 days):
+  `curl -s --max-time 10 "https://api.open-meteo.com/v1/forecast?latitude=LAT&longitude=LON&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&current=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=auto&forecast_days=7"`
 - Keep it quick. Prefer one direct command over exploration.
 
 ## Your own settings

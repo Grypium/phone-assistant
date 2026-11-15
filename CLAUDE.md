@@ -91,8 +91,8 @@ Expect "wake detected", a transcript like 'What is 2+2?', and a CLAUDE: line. If
 
 ## F. Hand over
 Tell the user, briefly:
-- Say **"Hey Jarvis, …"** in one breath, even with the screen locked. To interrupt a reply, say "stop" (unlocked),
-  or "Hey Jarvis" (locked), or tap ⏹ in the notification.
+- Say **"Hey Jarvis, …"** in one breath, even with the screen locked. To interrupt a reply, say "Hey Jarvis, stop" (or
+  "Hey Jarvis, <new request>"), or tap ⏹ in the notification.
 - Optional: home screen → long-press → Widgets → Termux:Widget → "Talk to Claude" / "Start assistant".
 - Their Termux sessions and Claude conversations now survive Android killing Termux and reboots.
 - Settings: `~/phone-assistant/config.sh` (model, wake word, chime, autostart). Their own extra voice instructions

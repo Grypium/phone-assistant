@@ -1,0 +1,17 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""is-stop HEARD [REPLY] — exit 0 if HEARD is a request to stop ("stop", "okay stop", "Jarvis, stop talking please",
+"never mind", "shut up"…): a stop word with at most 1 other word around it. Words that belong to REPLY (the reply
+leaking into the mic) are ignored."""
+import re, sys
+heard = sys.argv[1].lower() if len(sys.argv) > 1 else ""
+reply = sys.argv[2].lower() if len(sys.argv) > 2 else ""
+core = {"stop", "cancel", "quiet", "enough", "hush", "shush", "nevermind"}
+filler = {"ok", "okay", "hey", "please", "it", "now", "talking", "that", "that's", "thats", "be", "shut", "up",
+          "never", "mind", "jarvis", "alexa", "mycroft", "rhasspy", "claude", "just", "alright", "all", "right",
+          "you", "can", "thanks", "thank"}
+heard = heard.replace("shut up", "quiet").replace("never mind", "nevermind")
+words = re.findall(r"[a-z']+", heard)
+reply_words = set(re.findall(r"[a-z']+", reply)) - core
+rest = [w for w in words if w in core or w in filler or w not in reply_words]
+others = [w for w in rest if w not in core and w not in filler]
+sys.exit(0 if any(w in core for w in rest) and len(others) <= 1 else 1)

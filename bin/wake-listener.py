@@ -18,6 +18,9 @@ from openwakeword.model import Model
 
 MODEL = os.environ.get("WAKE_MODEL", "hey_jarvis")
 THRESH = float(os.environ.get("WAKE_THRESHOLD", "0.6"))
+# While a reply plays, the phone's own speech drowns the wake word (a "Hey Jarvis" that scores ~1.0 in a quiet room
+# scored ~0.35 over a reply), while the reply alone scores < 0.05. So interrupts use a lower threshold.
+THRESH_REPLY = float(os.environ.get("WAKE_THRESHOLD_REPLY", "0.25"))
 STATE = os.path.join(P, "state"); os.makedirs(STATE, exist_ok=True)
 LOG = os.path.join(P, "logs", "wake.log")
 CHUNK = 1280  # 80 ms at 16 kHz
@@ -70,7 +73,7 @@ def chime():
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def record_command(ff, vad, preroll):
+def record_command(ff, vad, preroll, start_timeout=None):
     """Keep reading the open stream until you've finished talking. Returns the wav path, or None if you didn't
     say anything after the wake word."""
     frames = []                                # 30 ms frames after detection
@@ -90,7 +93,7 @@ def record_command(ff, vad, preroll):
                 started = now - run * FRAME / RATE
         elif prob < 0.3:
             run = 0
-        if started is None and now > START_TIMEOUT:
+        if started is None and now > (start_timeout or START_TIMEOUT):
             break
         if started is not None and now - last_voice > END_SIL:
             break
@@ -123,6 +126,8 @@ def busy():
 
 SPEAKING = os.path.join(STATE, "speaking-wake")      # bin/speak: "a reply is playing, wake word = interrupt"
 INTERRUPT = os.path.join(STATE, "wake-interrupt")    # we write this when the wake word is heard during a reply
+FOLLOWUP = os.path.join(STATE, "wake-followup")      # ...then what you said after it: a wav path, or "" (nothing)
+FOLLOWUP_WAV = os.path.join(STATE, "wake-followup.wav")
 
 
 def want_mic():
@@ -148,20 +153,52 @@ def main():
         warmup = 0
         triggered = False; cmd = None
         recent.clear()
+        reply_peak = -1.0
         try:
             while True:
                 buf = ff.stdout.read(CHUNK * 2)
                 if len(buf) < CHUNK * 2:
                     log("stream ended, restarting"); time.sleep(2); break
                 if not want_mic():
+                    if reply_peak >= 0.1: log(f"during the reply: best wake score {reply_peak:.2f}")
                     break
                 recent.append(buf)
                 score = float(model.predict(np.frombuffer(buf, np.int16))[MODEL])
                 warmup += 1
-                if warmup > 20 and score >= THRESH:
-                    if busy():                      # a reply is playing: interrupt it, keep listening
+                replying = busy()
+                if replying:
+                    reply_peak = max(reply_peak, score)
+                elif reply_peak >= 0:
+                    if reply_peak >= 0.1: log(f"during the reply: best wake score {reply_peak:.2f}")
+                    reply_peak = -1.0
+                if warmup > 20 and score >= (THRESH_REPLY if replying else THRESH):
+                    if replying:                    # a reply is playing: interrupt it, keep listening
                         log(f"wake detected during reply score={score:.2f} -> interrupt")
                         open(INTERRUPT, "w").close()
+                        # keep recording what you say in the same breath: "Hey Jarvis, stop" or a new request.
+                        # bin/ask picks it up from FOLLOWUP.
+                        path = ""
+                        try:
+                            # skip the reply's last moments: bin/speak silences it (~0.5 s) and then removes
+                            # state/speaking. A "stop" said in that gap is lost, but silence means stop anyway.
+                            t_end = time.time() + 1.5
+                            while os.path.exists(os.path.join(STATE, "speaking")) and time.time() < t_end:
+                                ff.stdout.read(CHUNK * 2)
+                            # parec/ffmpeg buffer audio: drain until reads wait for new audio (caught up to live)
+                            for _ in range(40):
+                                t0 = time.time(); ff.stdout.read(CHUNK * 2)
+                                if time.time() - t0 > 0.05:
+                                    break
+                            for _ in range(3):                   # + 0.24 s for the speaker to fall silent
+                                ff.stdout.read(CHUNK * 2)
+                            got = record_command(ff, vad, [], start_timeout=2.5)
+                            if got:
+                                os.replace(got, FOLLOWUP_WAV); path = FOLLOWUP_WAV
+                        except Exception as e:
+                            log(f"follow-up recording failed: {e!r}")
+                        with open(FOLLOWUP + ".tmp", "w") as f:
+                            f.write(path)
+                        os.replace(FOLLOWUP + ".tmp", FOLLOWUP)
                         model.reset(); warmup = 0
                         continue
                     log(f"wake detected score={score:.2f}")

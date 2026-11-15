@@ -9,6 +9,7 @@ export STT_ENGINE=whisper          # whisper (offline, works locked) | android (
 export WHISPER_MODEL=base.en       # base.en (accurate, ~1.5 s) | tiny.en (~0.8 s)
 export WAKE_MODEL=hey_jarvis       # openWakeWord model: hey_jarvis, alexa, hey_mycroft (custom "hey claude" later)
 export WAKE_THRESHOLD=0.6          # higher = fewer false wakes, more misses
+export WAKE_THRESHOLD_REPLY=0.25   # while a reply plays ("Hey Jarvis, stop"); the reply drowns you out
 
 # Session keepalive
 export RESTORE_SESSIONS=1          # recreate tmux sessions after Termux is killed / phone reboots

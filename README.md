@@ -77,10 +77,12 @@ Settings live in `config.sh` (created from `config.example.sh`).
   don't start within 6 s. Whisper encodes 30 s of audio by default; a context of 1024 is ~1/3 faster. Smaller was
   faster still but misheard words ("what" → "1") and once doubled a phrase.
 - `bin/speak` — speaks a reply and lets you interrupt:
-  - **unlocked**: say "stop" (cancel, quiet, enough, never mind, that's enough…; only short stop phrases). Android's
-    recognizer ignores the phone's own speaker, so it hears you over the reply.
-  - **locked**: say the wake word ("Hey Jarvis"). The always-on wake listener keeps listening during the reply and
-    flags the interrupt; the assistant then listens for your new request.
+  - say **"Hey Jarvis, stop"**, locked or unlocked. The always-on wake listener keeps listening during the reply (with
+    a lower threshold, `WAKE_THRESHOLD_REPLY` 0.25, since the reply drowns you out), cuts it off the moment it hears
+    the wake word, and records what you say next in the same breath: "stop" / "never mind" / nothing → it stops;
+    anything else ("Hey Jarvis, what time is it?") → that's your new request.
+  - Only if the wake listener isn't running: "stop" with the phone unlocked, via Android's recognizer. It's slow:
+    Termux:API hands over its partial results only when the recognizer's session ends.
   - the notification's **⏹ Stop talking** button.
   - One `termux-tts-speak` process is started at once and fed one line per sentence. A process per sentence cost
     ~1 s of silence before each one.
@@ -152,7 +154,7 @@ CHANGELOG.md          what changed
 config.example.sh     settings template → config.sh
 ASSISTANT.md          Claude's voice-assistant instructions (+ your own ASSISTANT.local.md, not in git)
 bin/                  ask, assistant, wake-listener.py, hear, speak, claude-stream, keepalive, claude-args,
-                      adb-self, wifi-ip, is-locked, need-unlock, heal-api, shush, wait-wake
+                      adb-self, wifi-ip, is-locked, need-unlock, where, heal-api, shush, wait-wake
 assets/               chimes
 vendor/               whisper.cpp (cloned and built by install.sh, not in git)
 shell/                termux-init.sh (bashrc hook), tmux.conf

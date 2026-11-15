@@ -2,6 +2,31 @@
 
 All notable changes to this project. Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.1] - 2026-11-15
+
+### Added
+- **"Hey Jarvis, stop"** interrupts a reply, locked or unlocked. The listener silences the reply on the wake word
+  and records the rest of the breath: a stop phrase or nothing stops it, anything else becomes the new request
+  ("Hey Jarvis, what time is it?"). `bin/is-stop` holds the stop-phrase check.
+- `bin/where`: the phone's location in under a second, never hangs (timeouts, fallbacks, restarts Termux:API if a
+  try times out). The voice assistant uses it instead of `termux-location`.
+- Weather: the voice prompt points Claude at Open-Meteo for a 7-day forecast in one call (wttr.in only had 3 days).
+
+### Fixed
+- **Location requests hung and froze the assistant.** Termux:API only had location "while in use", so
+  `termux-location` from the (background) assistant never returned, and while it waited every other termux-* call,
+  speech included, was stuck. `install.sh` now grants background location; Claude got `where` (above) instead of calling it directly.
+- **Interrupting by voice didn't work with the phone unlocked.** Saying "stop" went through Android's recognizer,
+  but Termux:API hands over its partial results only when the recognizer's session ends (often 10+ s later, or never
+  if it's cut off), and Termux's PulseAudio held the mic so the recognizer mostly heard silence. Now the wake word
+  interrupts a reply whether the phone is locked or not; plain "stop" is only a fallback when the wake listener isn't
+  running. The wake word scores much lower over the reply's own speech (≈0.35 vs ≈1.0), so during a reply the
+  listener uses a lower threshold (`WAKE_THRESHOLD_REPLY`, 0.25; the reply alone scores < 0.05).
+- Slow replies ("one… two… three…") were cut off as a "hung engine" after a words-per-second estimate; with ADB it now
+  checks the phone is still talking first.
+- Stopping a reply (stop button, "stop", wake word) wasn't always logged; the log line now comes first, and the stop
+  buzz can no longer block. A stop before Claude said anything is logged as "(stopped before replying)".
+
 ## [0.4.0] - 2026-11-15
 
 ### Added
