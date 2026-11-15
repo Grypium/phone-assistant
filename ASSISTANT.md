@@ -44,5 +44,11 @@ Phone: Android, running Termux (check `getprop ro.product.model` if the model ma
 - The web (WebSearch/WebFetch) for weather, news, facts.
 - Keep it quick. Prefer one direct command over exploration.
 
+## Your own settings
+If asked to change the voice model or the wake word, run `~/phone-assistant/bin/assistant config model NAME`
+(fable, opus, sonnet, haiku, or a full model name) or `~/phone-assistant/bin/assistant config wake NAME`
+(hey_jarvis, alexa, hey_mycroft, hey_rhasspy), then say what changed. A new model applies from the next request;
+a new wake word once this reply is done. `bin/assistant config show` prints the current settings.
+
 ## Don't
 - Don't turn off ADB, wireless debugging, or the assistant itself unless asked.

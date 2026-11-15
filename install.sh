@@ -44,7 +44,7 @@ pkg install -y termux-api android-tools apksigner ffmpeg pulseaudio tmux git cur
 python3 -c "import openwakeword" 2>/dev/null || PYTHONPATH="$P/lib" python3 -c "import openwakeword" 2>/dev/null \
   || { pip install -q --no-deps openwakeword==0.6.0 tqdm && pip install -q requests; }
 PYTHONPATH="$P/lib" python3 -W ignore -c "
-from openwakeword.utils import download_models; download_models(['hey_jarvis','alexa','hey_mycroft'])" >/dev/null 2>&1 \
+from openwakeword.utils import download_models; download_models(['hey_jarvis','alexa','hey_mycroft','hey_rhasspy'])" >/dev/null 2>&1 \
   && ok "openWakeWord + models" || warn "openWakeWord setup failed"
 if [ ! -x "$P/vendor/whisper.cpp/build/bin/whisper-cli" ]; then   # offline speech-to-text (works when locked)
   pkg install -y cmake clang >/dev/null 2>&1
@@ -112,6 +112,7 @@ say "5/6 Voice assistant"
 mkdir -p "$HOME/.shortcuts/tasks" "$HOME/.termux/boot"; chmod 700 "$HOME/.shortcuts"
 printf '#!/data/data/com.termux/files/usr/bin/bash\nexec "%s/bin/ask"\n' "$P" > "$HOME/.shortcuts/tasks/Talk to Claude"
 printf '#!/data/data/com.termux/files/usr/bin/bash\n"%s/bin/assistant" start\n' "$P" > "$HOME/.shortcuts/tasks/Start assistant"
+printf '#!/data/data/com.termux/files/usr/bin/bash\n"%s/bin/assistant" config\n' "$P" > "$HOME/.shortcuts/tasks/Assistant settings"
 sed "s|^P=\"\$HOME/phone-assistant\"|P=\"$P\"|" "$P/boot/phone-assistant" > "$HOME/.termux/boot/phone-assistant"
 chmod +x "$HOME/.shortcuts/tasks/"* "$HOME/.termux/boot/phone-assistant"
 ok "home-screen shortcuts + boot script"

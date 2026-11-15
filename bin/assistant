@@ -4,12 +4,98 @@
 #   assistant stop         stop everything
 #   assistant status
 #   assistant wake on|off|toggle
+#   assistant config                       settings menu (dialogs on the phone, or prompts in a terminal)
+#   assistant config show
+#   assistant config model fable|opus|sonnet|haiku|<full model name>
+#   assistant config wake hey_jarvis|alexa|hey_mycroft|hey_rhasspy
 #   assistant notify TEXT  (internal) refresh the notification
 P="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"; [ -f "$P/config.sh" ] && . "$P/config.sh"
 S="$P/state"; L="$P/logs"; mkdir -p "$S" "$L"
 PIDF="$S/wake.pid"
 running(){ [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 killtree(){ local c; for c in $(pgrep -P "$1"); do killtree "$c"; done; kill "$1" 2>/dev/null; }
+
+MODELS="fable opus sonnet haiku"
+WAKES="hey_jarvis alexa hey_mycroft hey_rhasspy"   # openWakeWord's pretrained wake words
+wake_say(){ case "${1:-${WAKE_MODEL:-hey_jarvis}}" in
+  hey_jarvis) echo "Hey Jarvis";; alexa) echo "Alexa";; hey_mycroft) echo "Hey Mycroft";; hey_rhasspy) echo "Hey Rhasspy";;
+  *) echo "$1";; esac; }
+model_desc(){ case "$1" in
+  fable) echo "Fable (most capable)";; opus) echo "Opus (very capable)";; sonnet) echo "Sonnet (balanced · default)";;
+  haiku) echo "Haiku (fastest)";; *) echo "$1";; esac; }
+
+set_conf(){   # KEY VALUE: update config.sh in place (created from config.example.sh if missing)
+  local f="$P/config.sh"; [ -f "$f" ] || cp "$P/config.example.sh" "$f"
+  if grep -q "^export $1=" "$f"; then sed -i "s|^export $1=[^ #]*|export $1=$2|" "$f"; else echo "export $1=$2" >> "$f"; fi
+  export "$1=$2"
+}
+restart_listener(){   # pick up a new wake word; if a request is in progress, wait for it to finish first
+  running || return 0
+  if flock -n "$S/ask.lock" true 2>/dev/null; then
+    "$0" stop >/dev/null; "$0" start >/dev/null; echo "listener restarted"
+  else
+    ( setsid nohup bash -c "flock '$S/ask.lock' true; '$0' stop; '$0' start" >/dev/null 2>&1 & )
+    echo "listener restarts when the current request is done"
+  fi
+}
+set_model(){
+  [[ "$1" =~ ^[A-Za-z0-9._:-]+(\[[A-Za-z0-9]+\])?$ ]] || { echo "not a model name: $1" >&2; return 1; }
+  set_conf ASSISTANT_MODEL "$1"; echo "model: $1 (from the next request)"
+}
+set_wake(){
+  case " $WAKES " in *" $1 "*) ;; *) echo "unknown wake word: $1 (choose: $WAKES)" >&2; return 1;; esac
+  PYTHONPATH="$P/lib" python3 -W ignore -c "from openwakeword.utils import download_models; download_models(['$1'])" \
+    >/dev/null 2>&1 || { echo "couldn't download the $1 model" >&2; return 1; }
+  set_conf WAKE_MODEL "$1"; echo "wake word: $(wake_say "$1")"; restart_listener
+}
+show_conf(){
+  echo "model:     ${ASSISTANT_MODEL:-sonnet}"
+  echo "wake word: $(wake_say) (${WAKE_MODEL:-hey_jarvis}, threshold ${WAKE_THRESHOLD:-0.6})"
+}
+pick(){   # ITEM... -> prints the 0-based index of the chosen item, nothing if cancelled.
+  # On the phone: a bottom sheet (one tap picks; it shows no title, so items must speak for themselves).
+  # termux-dialog splits items on commas, so commas are replaced.
+  if [ -t 0 ]; then
+    local i=1 x; for x in "$@"; do echo "  $i) $x" >&2; i=$((i+1)); done
+    read -rp "  choose [1-$#, enter = cancel]: " x >&2
+    [[ "$x" =~ ^[0-9]+$ ]] && [ "$x" -ge 1 ] && [ "$x" -le $# ] && echo $((x - 1))
+  else
+    local items=() x; for x in "$@"; do items+=("${x//,/ }"); done
+    local IFS=,; timeout 120 termux-dialog sheet -v "${items[*]}" 2>/dev/null \
+      | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['index'] if d.get('code')==0 else '')" 2>/dev/null
+  fi
+}
+config_menu(){
+  local tell=echo; [ -t 0 ] || tell="termux-toast -s"
+  local i m w c listen models=($MODELS) wakes=($WAKES) items
+  while :; do
+    listen=on; [ -f "$S/wake-paused" ] && listen=off; running || listen=off
+    i=$(pick "Model: $(model_desc "${ASSISTANT_MODEL:-sonnet}") — change" \
+             "Wake word: $(wake_say) — change" \
+             "Listening for the wake word: $listen — turn $([ $listen = on ] && echo off || echo on)" \
+             "Turn the assistant off")
+    case "$i" in
+      0) items=(); for m in "${models[@]}"; do
+           items+=("$([ "$m" = "${ASSISTANT_MODEL:-sonnet}" ] && echo "✓ ")Model: $(model_desc "$m")"); done
+         items+=("Model: other (type a name)")
+         c=$(pick "${items[@]}")
+         if [ "$c" = "${#models[@]}" ]; then
+           if [ -t 0 ]; then read -rp "  model name: " m
+           else m=$(timeout 120 termux-dialog text -t "Model name" -i "e.g. claude-sonnet-5-5" 2>/dev/null \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['text'].strip() if d.get('code')==-1 else '')"); fi
+         elif [ -n "$c" ]; then m=${models[$c]}; else m=; fi
+         [ -n "$m" ] && $tell "$(set_model "$m" 2>&1)" ;;
+      1) items=(); for w in "${wakes[@]}"; do
+           items+=("$([ "$w" = "${WAKE_MODEL:-hey_jarvis}" ] && echo "✓ ")Wake word: $(wake_say "$w")"); done
+         c=$(pick "${items[@]}")
+         [ -n "$c" ] && $tell "$(set_wake "${wakes[$c]}" 2>&1 | head -1)" ;;
+      2) if [ $listen = on ]; then "$0" wake off >/dev/null; $tell "Wake word off. Tap Talk to use the assistant."
+         else "$0" wake on >/dev/null; $tell "Listening for \"$(wake_say)\""; fi ;;
+      3) "$0" stop >/dev/null; $tell "Assistant off. Start it again from the Start assistant shortcut."; break ;;
+      *) break ;;
+    esac
+  done
+}
 
 notify(){
   local wake="off"; running && [ ! -f "$S/wake-paused" ] && wake="on"
@@ -18,7 +104,7 @@ notify(){
     --action "$P/bin/ask" \
     --button1 "🎤 Talk"          --button1-action "$P/bin/ask" \
     --button2 "⏹ Stop talking"  --button2-action "$P/bin/shush" \
-    --button3 "Off"             --button3-action "$P/bin/assistant stop"
+    --button3 "⚙ Settings"      --button3-action "$P/bin/assistant config"
 }
 
 case "$1" in
@@ -29,7 +115,7 @@ case "$1" in
       nohup setsid python3 "$P/bin/wake-listener.py" >> "$L/wake.log" 2>&1 &
       echo $! > "$PIDF"
     fi
-    notify "Ready. Say \"Hey Jarvis\" or tap Talk."; echo "started (pid $(cat "$PIDF"))" ;;
+    notify "Ready. Say \"$(wake_say)\" or tap Talk."; echo "started (pid $(cat "$PIDF"))" ;;
   stop)
     running && killtree "$(cat "$PIDF")"   # the listener and its parec/ffmpeg, by PID only
     rm -f "$PIDF"; termux-notification-remove assistant; termux-wake-unlock
@@ -37,6 +123,7 @@ case "$1" in
     echo "$(date '+%F %T') stopped (assistant stop)" >> "$L/wake.log"; echo stopped ;;
   status)
     running && echo "listener running (pid $(cat "$PIDF"))" || echo "listener not running"
+    show_conf
     [ -f "$S/wake-paused" ] && echo "wake word paused"; tail -3 "$L/wake.log" 2>/dev/null ;;
   wake)
     if ! running; then
@@ -48,6 +135,14 @@ case "$1" in
       esac
     fi
     notify "Ready" ;;
+  config|settings)
+    case "${2:-}" in
+      show) show_conf ;;
+      model) [ -n "${3:-}" ] || { echo "models: $MODELS (or a full model name)"; exit 1; }; set_model "$3" ;;
+      wake) [ -n "${3:-}" ] || { echo "wake words: $WAKES"; exit 1; }; set_wake "$3" ;;
+      "") config_menu ;;
+      *) sed -n '/assistant config/p' "$0" | head -4; exit 1 ;;
+    esac ;;
   notify) shift; notify "$*" ;;
-  *) sed -n '2,8p' "$0" ;;
+  *) sed -n '2,12p' "$0" ;;
 esac

@@ -52,7 +52,15 @@ closes all Termux sessions once (tmux sessions come back by themselves).
 Settings live in `config.sh` (created from `config.example.sh`).
 
 ## Voice assistant
-- `bin/assistant start|stop|status|wake on|off` — notification with 🎤 Talk / wake toggle / Stop.
+- `bin/assistant start|stop|status|wake on|off` — notification with 🎤 Talk / ⏹ Stop talking / ⚙ Settings.
+- **Settings:** the notification's ⚙ Settings button or the "Assistant settings" shortcut (tap-to-pick menus),
+  `bin/assistant config` in a terminal, or just ask ("Hey Jarvis, switch to Opus"). The menu also turns wake word
+  listening on/off and turns the assistant off. Settings:
+  - **model** for voice replies: fable, opus, sonnet (default), haiku, or a full model name. Applies from the next
+    request.
+  - **wake word**: Hey Jarvis (default), Alexa, Hey Mycroft, Hey Rhasspy, openWakeWord's pretrained models. The
+    listener restarts once any request in progress is done. (Alexa also wakes nearby Echo devices.)
+  - `bin/assistant config show` / `config model NAME` / `config wake NAME`. Everything else lives in `config.sh`.
 - `bin/ask` — one exchange (listen → Claude → speak). `bin/ask "text"` skips the mic; `bin/ask --audio WAV` takes a
   recording made by the wake listener. If Claude's reply ends with a question, it listens again. Conversation context
   carries over for 30 minutes.
@@ -66,8 +74,8 @@ Settings live in `config.sh` (created from `config.example.sh`).
 - `bin/hear` — records your request and transcribes it **offline with whisper.cpp** (`vendor/whisper.cpp`, model
   base.en). Works with the phone locked; Android's recognizer (`termux-speech-to-text`) hangs on the lock screen,
   so it's only used if `STT_ENGINE=android`. Ends 0.8 s after you stop talking (`HEAR_END_SILENCE`); gives up if you
-  don't start within 6 s. Whisper pads to 30 s of audio unless told otherwise: `-ac` sized to the recording cut a
-  short command from 1.1 s to 0.4 s with the same text.
+  don't start within 6 s. Whisper encodes 30 s of audio by default; a context of 1024 is ~1/3 faster. Smaller was
+  faster still but misheard words ("what" → "1") and once doubled a phrase.
 - `bin/speak` — speaks a reply and lets you interrupt:
   - **unlocked**: say "stop" (cancel, quiet, enough, never mind, that's enough…; only short stop phrases). Android's
     recognizer ignores the phone's own speaker, so it hears you over the reply.

@@ -2,6 +2,25 @@
 
 All notable changes to this project. Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.0] - 2026-11-15
+
+### Added
+- **Settings for the model and the wake word**: an "Assistant settings" home-screen shortcut with tap-to-pick
+  dialogs, `bin/assistant config [show | model NAME | wake NAME]`, or by voice ("Hey Jarvis, switch to Opus").
+  Models: fable, opus, sonnet, haiku or a full name. Wake words: Hey Jarvis, Alexa, Hey Mycroft, Hey Rhasspy.
+  A wake word change restarts the listener once the current request is done.
+- `bin/assistant status` shows the current settings.
+- Notification: the third button is now **⚙ Settings** (model, wake word, wake word on/off, turn the assistant off),
+  replacing "Off", which moved into that menu.
+
+### Fixed
+- Settings menu options were garbled: Android's dialog splits options on commas ("Sonnet (balanced, default)"
+  became two options). Menus are now one-tap bottom sheets, options contain no commas, and picks are matched by
+  position.
+- Removing the wake word from one-breath requests only knew "Jarvis"; it now follows the configured wake word.
+- Transcription accuracy: the shortened whisper audio context (0.3.0 speed-up) misheard words ("what" → "1") and
+  once doubled a phrase. It now uses 1024 (≈1.0 s per command instead of ≈0.5 s; the full context takes ≈1.5 s).
+
 ## [0.3.0] - 2026-11-14
 
 ### Added

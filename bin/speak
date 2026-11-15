@@ -41,7 +41,7 @@ import re, sys
 heard, reply = sys.argv[1].lower(), sys.argv[2].lower()
 core = {"stop", "cancel", "quiet", "enough", "hush", "shush", "nevermind"}
 filler = {"ok", "okay", "hey", "please", "it", "now", "talking", "that", "that's", "thats", "be", "shut", "up",
-          "never", "mind", "jarvis", "claude", "just", "alright", "all", "right"}
+          "never", "mind", "jarvis", "alexa", "mycroft", "rhasspy", "claude", "just", "alright", "all", "right"}
 heard = heard.replace("shut up", "quiet").replace("never mind", "nevermind")
 words = re.findall(r"[a-z']+", heard)
 reply_words = set(re.findall(r"[a-z']+", reply)) - core

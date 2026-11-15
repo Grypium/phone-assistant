@@ -8,7 +8,7 @@ Env: WHISPER_MODEL (base.en), HEAR_START_TIMEOUT (6 s to start talking), HEAR_MA
      HEAR_END_SILENCE (0.8 s of quiet ends the command).
   hear                      record, then transcribe
   hear --file WAV           transcribe an existing recording (the wake listener records "Hey Jarvis, <request>")
-  hear --file WAV --strip-wake   ...and drop a leading "Hey Jarvis" from the text
+  hear --file WAV --strip-wake   ...and drop the leading wake word (WAKE_MODEL) from the text
 """
 import os, re, subprocess, sys, time, wave
 import numpy as np
@@ -88,16 +88,17 @@ def record():
 
 
 def audio_ctx(path):
-    """Whisper always encodes 30 s of audio; a short command only needs ~50 frames per second of it.
-    Shrinking the context cut transcription of a 2.4 s command from 1.1 s to 0.4 s with the same text."""
+    """Whisper always encodes 30 s of audio (context 1500). Less is faster, but too little costs accuracy: at 768 and
+    below "Alexa, what is 2+2?" came out as "1 is 2+2", and 320 doubled a short phrase. 1024 was right and takes
+    ~1.0 s (vs ~1.5 s for the full context)."""
     try:
         with wave.open(path) as w:
             dur = w.getnframes() / w.getframerate()
     except Exception:
         return 0
-    if dur > 25:
+    if dur > 18:
         return 0                                         # 0 = full context
-    return max(256, min(1500, (int(dur * 50) + 128 + 63) // 64 * 64))
+    return 1024
 
 
 def threads():
@@ -133,7 +134,15 @@ def transcribe(path):
     return text
 
 
-WAKE_PREFIX = re.compile(r"(?i)^\W*(?:(?:hey|hi|okay|ok|a)\W+)?(?:jarvis|jarvas|jervis|javis|travis|davis|vis)\b\W*")
+# How whisper tends to write each wake word (the recording starts with it when you say it all in one breath).
+WAKE_SPELLINGS = {
+    "hey_jarvis": r"jarvis|jarvas|jervis|javis|travis|davis|vis",
+    "alexa": r"alexa|alexia|alexis|alexs?|lexa",
+    "hey_mycroft": r"my ?croft|mycroft|microsoft|my craft|minecraft|croft",
+    "hey_rhasspy": r"rhasspy|rhaspy|raspy|raspi|rasp(?:berry)? ?pi|haspy|ruspy",
+}
+_w = WAKE_SPELLINGS.get(os.environ.get("WAKE_MODEL", "hey_jarvis"), "|".join(WAKE_SPELLINGS.values()))
+WAKE_PREFIX = re.compile(r"(?i)^\W*(?:(?:hey|hi|okay|ok|a)\W+)?(?:" + _w + r")\b\W*")
 
 
 def strip_wake(text):
