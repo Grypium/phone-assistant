@@ -157,9 +157,10 @@ if [ $YES = 0 ] && [ $TTY = 0 ]; then echo "   Not installing without --yes (non
 if [ $YES = 0 ]; then read -rp "   Continue? [y/N] " a; [ "$a" = y ] || [ "$a" = Y ] || { echo "   Skipped. Re-run when ready."; exit 0; }; fi
 # Run the install on the phone's side (adb shell) so it finishes even though Termux gets killed.
 dev=""; for pk in "${todo[@]}"; do $ADB push "$tmp/$pk.apk" "/data/local/tmp/pa-$pk.apk" >/dev/null; dev="$dev pm install --user 0 /data/local/tmp/pa-$pk.apk; rm /data/local/tmp/pa-$pk.apk;"; done
-$ADB shell "setsid nohup sh -c 'sleep 2; $dev $grants; am start -n com.termux/.app.TermuxActivity' > /data/local/tmp/pa-install.log 2>&1 &"
+# Termux:Boot only runs at boot after its app has been opened once; then bring Termux back to the front.
+$ADB shell "setsid nohup sh -c 'sleep 2; $dev $grants; am start -n com.termux.boot/.BootActivity; sleep 2; am start -n com.termux/.app.TermuxActivity' > /data/local/tmp/pa-install.log 2>&1 &"
 echo "   Installing… (if Termux closes, just reopen it)"
 for _ in $(seq 1 60); do $ADB shell cat /data/local/tmp/pa-install.log 2>/dev/null | grep -q TermuxActivity && break; sleep 2; done
 $ADB shell cat /data/local/tmp/pa-install.log 2>/dev/null | grep -E 'Success|Failure' | sed 's/^/   /'
 $ADB shell rm -f /data/local/tmp/pa-install.log
-ok "Next: open the Termux:Boot app once (enables start at boot), and add the Termux:Widget shortcuts."
+ok "Optional: add the Termux:Widget shortcuts to your home screen (Talk to Claude, Start assistant)."

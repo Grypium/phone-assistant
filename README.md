@@ -11,72 +11,43 @@ Turns an Android phone running Termux into:
 
 ## Getting started
 
-Two manual steps get Termux and Claude Code onto the phone. After that, Claude sets up the rest from this repo.
+You need: a 64-bit Android 11+ phone, Wi-Fi during setup, and a Claude subscription (Pro/Max) or an Anthropic
+Console account. About 15 minutes.
 
-Requirements: a 64-bit Android phone (8 or newer; 11+ recommended for wireless ADB), Wi-Fi for the setup, and a
-Claude subscription (Pro/Max) or an Anthropic Console account.
+**1. Install Termux from F-Droid.** Get it at https://f-droid.org/packages/com.termux/ (either install the F-Droid
+app store first from https://f-droid.org, or tap "Download APK" on that page). Allow "install unknown apps" when
+Android asks. Don't use the Google Play version: Termux's add-ons, which setup installs for you, only work with a
+matching build. Open Termux once and wait for it to finish installing.
 
-### Step 1: install Termux and its add-ons from F-Droid
-
-Install these four apps, **all from F-Droid**. Add-ons only work when they're signed by the same source as Termux,
-and the Google Play build of Termux is a different, incompatible build.
-
-| App | F-Droid page | What it's for |
-|---|---|---|
-| Termux | https://f-droid.org/packages/com.termux/ | the terminal |
-| Termux:API | https://f-droid.org/packages/com.termux.api/ | mic, speech, notifications, vibration, Wi-Fi info |
-| Termux:Boot | https://f-droid.org/packages/com.termux.boot/ | starts everything after a reboot |
-| Termux:Widget | https://f-droid.org/packages/com.termux.widget/ | home-screen shortcuts ("Talk to Claude") |
-
-1. Install the F-Droid client from https://f-droid.org (or download each APK straight from the pages above).
-   Allow "install unknown apps" for your browser / F-Droid when Android asks.
-2. If you already have Termux from Google Play, uninstall it first (this deletes its files).
-3. Install all four now, before you start working in Termux. Installing an add-on later closes every open Termux
-   session.
-4. Open Termux once and let it finish "Installing bootstrap packages", then run:
-   ```bash
-   pkg update -y && pkg upgrade -y
-   uname -m            # must print aarch64
-   ```
-5. Open **Termux:Boot** once (that's what enables it to run at boot).
-
-Already have Termux from GitHub instead? That works too, as long as all add-ons also come from GitHub. The
-installer checks the signatures and fetches matching add-ons.
-
-### Step 2: install Claude Code in Termux
-
-Anthropic's Claude Code binary doesn't run on Android out of the box. The community project
-[claude-code-android](https://github.com/ferrumclaudepilgrim/claude-code-android) installs the official linux-arm64
-build and patches it to run under Termux (glibc-runner). It updates itself once a day. It's a third-party
-script: read it first if you like.
-
-In a fresh Termux session (not inside another Claude session):
+**2. Paste this into Termux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ferrumclaudepilgrim/claude-code-android/main/install.sh -o install.sh
-bash install.sh
+curl -fsSLo setup.sh https://raw.githubusercontent.com/Grypium/phone-assistant/main/setup.sh && bash setup.sh
 ```
-It asks two yes/no questions, then downloads ~230 MB (5–10 min). If it reports that the current binary crashes on
-your Android version, accept its offer to install the pinned fallback release. Then:
-```bash
-claude          # sign in when it asks (it prints a URL to open in the browser)
-```
+It updates Termux, downloads this repo to `~/phone-assistant`, and installs Claude Code. Claude Code doesn't run on
+Android out of the box, so this uses the community installer
+[claude-code-android](https://github.com/ferrumclaudepilgrim/claude-code-android): it installs Anthropic's official
+binary, patched to run in Termux, and keeps it updated. It asks two yes/no questions. Then it starts Claude.
 
-### Step 3: let Claude set up the rest
-```bash
-pkg install -y git
-git clone https://github.com/Grypium/phone-assistant ~/phone-assistant
-cd ~ && claude
-```
-Then tell Claude: **"read ~/phone-assistant/CLAUDE.md and set it up"**. It runs `./install.sh`, walks you through ADB
-pairing (you read it the pairing code from Settings), starts the assistant, and tests it with you.
+**3. Sign in, and Claude does the rest.** Following [CLAUDE.md](CLAUDE.md), Claude:
+- builds the offline speech-to-text and wake word engines
+- walks you through turning on **Wireless debugging** and reading it a pairing code (the one thing you do in Settings)
+- switches off Android's background killers for Termux
+- installs Termux:API, Termux:Boot and Termux:Widget itself. Termux closes and comes back during this, and Claude
+  picks up where it left off.
+- starts the voice assistant and tests it
+
+Afterwards, optionally add the Termux:Widget shortcuts to your home screen ("Talk to Claude", "Start assistant").
 
 Start `claude` from your home directory (`cd ~`). The claude-code-android launcher currently fails anywhere else with
 `preload not found "./.local/share/claude/setdns.js"`.
 
-Manual alternative: `cd ~/phone-assistant && ./install.sh`. It's interactive and safe to re-run; it skips whatever's
-done. Options: `--pair IP:PORT CODE`, `--yes`, `--no-addons`.
-
-Afterwards: add the **Termux:Widget** shortcuts to your home screen (long-press home → Widgets → Termux:Widget).
+### Doing it by hand
+```bash
+pkg install -y git && git clone https://github.com/Grypium/phone-assistant ~/phone-assistant
+cd ~/phone-assistant && ./install.sh     # interactive; safe to re-run, skips what's done
+```
+Options: `--pair IP:PORT CODE` (ADB pairing without prompts), `--no-addons`, `--yes`. Installing the add-ons
+closes all Termux sessions once (tmux sessions come back by themselves).
 
 Settings live in `config.sh` (created from `config.example.sh`).
 
@@ -135,6 +106,9 @@ Settings live in `config.sh` (created from `config.example.sh`).
   first look at it. Sessions waiting for their tab are marked `@pa_tab_pending` so a new tab doesn't grab them.
   Requires `allow-external-apps = true` in `~/.termux/termux.properties` and "Appear on top" for Termux.
 - Escape hatch: `PA_NO_TMUX=1` before opening a session; `bin/keepalive clear` forgets the snapshot.
+- `bin/keepalive adopt [PROMPT]`, run from inside Claude Code: reopens *that* conversation (with its flags, plus PROMPT)
+  the next time Termux starts, even though it is not in tmux. Setup uses it before installing the add-ons, which
+  kills Termux. It is valid for 1 hour; `adopt --cancel` drops it.
 - Android side (via ADB, persists across reboots): phantom process killer off, Doze allowlist, exempt standby bucket.
 
 ## ADB to the phone itself
@@ -162,7 +136,8 @@ Settings live in `config.sh` (created from `config.example.sh`).
 ## Layout
 ```
 install.sh            setup (idempotent)
-CLAUDE.md             setup instructions for Claude ("read ~/phone-assistant/CLAUDE.md and set it up")
+setup.sh              one-command bootstrap for a fresh Termux (repo + Claude Code, then hands off to Claude)
+CLAUDE.md             setup instructions Claude follows
 config.example.sh     settings template → config.sh
 ASSISTANT.md          Claude's voice-assistant instructions (+ your own ASSISTANT.local.md, not in git)
 bin/                  ask, assistant, wake-listener.py, hear, speak, claude-stream, keepalive, claude-args,

@@ -11,9 +11,12 @@
 #   keepalive ensure-daemon   start the background saver (snapshots every 15 s while tmux runs)
 #   keepalive clear           forget the snapshot (used after you close sessions on purpose)
 #   keepalive show            print the snapshot
+#   keepalive adopt [PROMPT]  (run from inside Claude Code) reopen *this* Claude conversation after Termux restarts,
+#                             even though it isn't in tmux, and send it PROMPT. For a setup step that kills Termux.
+#                             Valid for 1 hour, used once.  `keepalive adopt --cancel` forgets it.
 P="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"; [ -f "$P/config.sh" ] && . "$P/config.sh"
 S="$P/state"; mkdir -p "$S" "$P/logs"
-SNAP="$S/sessions.tsv"; PIDF="$S/keepalive.pid"; LOG="$P/logs/keepalive.log"
+SNAP="$S/sessions.tsv"; ADOPT="$S/adopt.tsv"; PIDF="$S/keepalive.pid"; LOG="$P/logs/keepalive.log"
 SEP=$'\x1f'
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
 
@@ -54,6 +57,28 @@ PY
   rm -f "$tmp.raw"
 }
 
+adopt(){
+  [ "${1:-}" = --cancel ] && { rm -f "$ADOPT"; echo "cancelled"; return 0; }
+  local p=$PPID
+  while [ "${p:-1}" -gt 1 ] && [ ! -f "$HOME/.claude/sessions/$p.json" ]; do
+    p=$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null)
+  done
+  [ "${p:-1}" -gt 1 ] || { echo "not running inside Claude Code" >&2; return 1; }
+  python3 - "$p" "$P/bin/claude-args" "${1:-}" > "$ADOPT" <<'PY' || { rm -f "$ADOPT"; return 1; }
+import json, os, subprocess, sys, time
+pid, claude_args, prompt = sys.argv[1:4]
+sid = json.load(open(os.path.expanduser(f"~/.claude/sessions/{pid}.json")))["sessionId"]
+argv = [a.decode() for a in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[1:] if a]
+out = subprocess.run([claude_args, *argv], capture_output=True, text=True)
+flags = out.stdout.split("\n")[1] if out.returncode == 0 else ""
+cwd = os.readlink(f"/proc/{pid}/cwd")
+print("\x1f".join([str(int(time.time())), sid, flags, cwd, " ".join(prompt.split())]))
+PY
+  IFS="$SEP" read -r _ cid flags dir _ < "$ADOPT"
+  log "adopted $cid (claude${flags:+ $flags}) in $dir for the next restore"
+  echo "will reopen conversation $cid${flags:+ with: $flags} when Termux restarts"
+}
+
 running_conv(){  # is conversation $1 open in a live claude process?
   pgrep -f -- "$1" >/dev/null && return 0
   local f; for f in "$HOME"/.claude/sessions/*.json; do
@@ -64,6 +89,7 @@ running_conv(){  # is conversation $1 open in a live claude process?
 restore(){
   [ "${RESTORE_SESSIONS:-1}" = 1 ] || return 0
   tmux has-session 2>/dev/null && return 0          # already running, nothing to do
+  restore_adopted
   [ -s "$SNAP" ] || return 0
   log "restoring $(wc -l < "$SNAP") window(s)"
   local sess idx name dir cid flags cmd win
@@ -93,6 +119,21 @@ restore(){
       log "  $sess:$name in $dir"
     fi
   done < "$SNAP"
+}
+
+restore_adopted(){   # see `adopt`
+  [ -s "$ADOPT" ] || return 0
+  local at cid flags dir prompt cmd win
+  IFS="$SEP" read -r at cid flags dir prompt < "$ADOPT"; rm -f "$ADOPT"
+  [ $(( $(date +%s) - ${at:-0} )) -lt 3600 ] || { log "adopted $cid expired, not reopening"; return 0; }
+  running_conv "$cid" && { log "adopted $cid is still running, not reopening"; return 0; }
+  [ -d "$dir" ] || dir="$HOME"
+  win=$(tmux new-session -d -P -F '#{window_id}' -s claude -c "$dir" 2>/dev/null ||
+        tmux new-window -d -P -F '#{window_id}' -t "=claude:" -c "$dir")
+  cmd="claude${flags:+ $flags} --resume $cid"
+  [ -n "$prompt" ] && cmd="$cmd $(printf '%q' "$prompt")"
+  tmux send-keys -t "$win" "$cmd" Enter
+  log "reopened adopted conversation: $cmd"
 }
 
 # Give every tmux session that no tab is showing its own Termux tab (in creation order), so after a
@@ -152,6 +193,7 @@ case "$1" in
     nohup setsid "$0" _daemon >/dev/null 2>&1 & ;;
   _daemon) daemon ;;
   clear) rm -f "$SNAP"; log "snapshot cleared (sessions closed on purpose)" ;;
+  adopt) adopt "${2:-}" ;;
   show) [ -s "$SNAP" ] && tr "$SEP" '\t' < "$SNAP" || echo "(no snapshot)" ;;
   *) sed -n '2,13p' "$0" ;;
 esac

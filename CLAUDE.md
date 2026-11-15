@@ -1,99 +1,113 @@
 # Setting up phone-assistant (instructions for Claude)
 
-The user has done the manual steps in README.md: Termux (plus, ideally, Termux:API / Boot / Widget) installed from
-the same source, and Claude Code installed with claude-code-android. You're running inside Termux on their phone. Your
-job: get everything else working, talking the user through the few things only they can do on screen.
+You're running in Termux on the user's phone, most likely started by `setup.sh`. The user has done only two things:
+installed Termux (normally from F-Droid) and run setup.sh. Everything else is your job. Make it easy for them: do
+everything you can yourself, and when you need them, give one short, concrete instruction at a time.
 
-Before starting, tell the user briefly what will happen (see the steps below) and that it takes ~10–20 minutes, mostly
-building whisper.cpp.
+The only things the user has to do:
+1. Turn on Developer options and Wireless debugging, and read you a pairing code (step B).
+2. Reopen Termux if it doesn't come back by itself after the add-ons install (step D).
+3. Optionally, add home-screen widgets and try the voice assistant.
 
 ## Rules
 - Run `claude` only from `~`: the launcher fails in other directories (`preload not found ./.local/share/claude/setdns.js`).
   When you call `claude -p` yourself, `cd ~` first.
 - `install.sh` is idempotent: re-run it after fixing anything. Run it with stdin from /dev/null; it never prompts then.
+- Until the Termux:API app is installed (step D), `termux-*` commands hang. Don't call them before that.
 - Never use `pkill -f` / `killall` with broad patterns: they can kill your own shell. Kill by PID.
-- **Installing a Termux add-on closes every Termux session, including this one.** Never install one without warning
-  the user first, and only after step C below.
-- Don't change Android settings beyond what install.sh does without asking.
-- Don't commit, push or delete anything in the repo unless asked.
+- Installing Termux add-ons closes every Termux session, this one included. Only do it as described in step D.
+- Don't change Android settings beyond what install.sh does without asking. Don't commit or push unless asked.
 
-## Steps
-
-### A. Check prerequisites
+## A. Start (tell the user the plan in 3–4 lines first)
+Say it takes ~15 minutes and you'll need them once, for a pairing code in Settings. Then:
 ```bash
-uname -m                                   # aarch64
-echo $TERMUX_VERSION
-pm list packages 2>/dev/null | grep termux # may be empty without ADB; see below
-termux-wifi-connectioninfo                 # hangs/fails if the Termux:API *app* isn't installed
+uname -m; echo "$TERMUX_VERSION"            # aarch64, a version
+pkg install -y android-tools >/dev/null      # adb, needed for pairing
+cd ~/phone-assistant && nohup ./install.sh --no-addons </dev/null > logs/install-1.log 2>&1 &
 ```
-If `termux-wifi-connectioninfo` doesn't return JSON within ~10 s, the Termux:API app is missing (the `termux-api`
-package alone isn't enough). Ask the user to install Termux:API (and Boot, Widget) from the same place they got
-Termux (README step 1) *before* continuing. It's much easier now than later, when installing them kills sessions.
+The installer's step 1 (packages, wake word models, building whisper.cpp) takes ~10 minutes. Let it run in the
+background while you do the pairing with the user. Check `logs/install-1.log` now and then.
 
-### B. Packages, models, whisper.cpp (no user action)
+## B. ADB pairing (the user does this on screen)
+ADB to the phone itself lets setup switch off Android's process killers, install the Termux add-ons, read the lock
+state, and operate apps. One step at a time:
+1. Settings → About phone → Software information → tap **Build number** 7 times (on Pixels: About phone → Build
+   number). Enter the PIN if asked. "You are now a developer."
+2. Settings → Developer options (on Samsung: at the bottom of Settings) → **Wireless debugging** ON. It needs Wi-Fi.
+   If it says "no IP available", turn Wi-Fi or Wireless debugging off and on.
+3. Tap the words **Wireless debugging** to open it → **Pair device with pairing code**.
+   Tip: open Termux and Settings side by side in split screen, otherwise the code disappears when they switch apps.
+4. Ask them to tell you the **IP address & port** and the **6-digit code** from that dialog. (The pairing port differs
+   from the one on the main Wireless debugging screen.)
+```bash
+adb pair IP:PORT CODE && ~/phone-assistant/bin/adb-self IP
+adb -s localhost:5555 shell echo ok
+```
+`adb-self` finds the connect port by scanning and arms `localhost:5555`, so ADB keeps working without Wi-Fi until the
+next reboot. If pairing fails: the code expires after a minute or two, so ask for a fresh one.
+
+## C. Finish the base install
+Wait for the background installer to finish (`tail logs/install-1.log` shows `6/6`, or no install.sh process is
+left). Fix any `!` lines. Then run it again, now with ADB available. This applies the Android settings (steps 3–5)
+and stops before the add-ons:
 ```bash
 cd ~/phone-assistant && ./install.sh --no-addons </dev/null
 ```
-Step 1 takes the longest (pkg installs, openWakeWord models, whisper.cpp build + base.en/tiny.en models). Run it in
-the background if your tool times out, and watch for `✓`/`!` lines. Fix any `!` and re-run.
-Step 2 will say "not paired" the first time: that's expected.
+After this, every new Termux session runs inside tmux, and tmux sessions survive Termux being killed.
 
-### C. ADB pairing (the user does this on screen)
-ADB to the phone itself lets the assistant switch off Android's process killers, read the lock state, and operate apps.
-Walk the user through it:
-1. Settings → About phone → Software information → tap **Build number** 7 times (enables Developer options).
-2. Settings → Developer options → **Wireless debugging** ON (needs Wi-Fi; if it says "no IP available", toggle Wi-Fi
-   or Wireless debugging off and on).
-3. Tap **Pair device with pairing code**. Tip: use split screen (Termux + Settings), or the code disappears when they
-   switch apps.
-4. Ask them for the **IP address & port** shown in that dialog and the **6-digit code**. The pairing port is NOT the
-   port shown on the main Wireless debugging screen.
-Then:
+## D. Termux add-ons (Termux:API, Termux:Boot, Termux:Widget)
+`install.sh` downloads them from the same source as the user's Termux (checking the signatures) and installs them over
+ADB. Installing them closes every Termux session, **including this conversation**. This conversation isn't in tmux,
+so register it to be reopened first:
 ```bash
-./install.sh --no-addons --pair IP:PORT CODE </dev/null
+cd ~/phone-assistant
+bin/keepalive adopt "Termux restarted after installing the add-ons. Continue the phone-assistant setup at step E of ~/phone-assistant/CLAUDE.md."
 ```
-This pairs, finds the connect port by scanning, and arms `localhost:5555`, so ADB keeps working without Wi-Fi until
-the next reboot. Steps 3–5 then run with ADB. Verify: `adb -s localhost:5555 shell echo ok`.
-
-### D. Add-ons (only if any are missing)
-If step 6 of install.sh lists add-ons to install, warn the user: **Android will close every Termux session, including
-this conversation.** Sessions started after step 4 run in tmux and come back automatically when Termux is reopened,
-but this conversation started before that. Ask them to:
-1. open a **new Termux session** (swipe from the left edge → New session); it starts inside tmux now,
-2. run `claude --continue` there, and continue the setup from that session,
-3. then run `./install.sh --yes </dev/null`.
-After it's done: they open **Termux:Boot** once.
-
-### E. Start and test the assistant
+Tell the user: "I'm installing the Termux add-ons now. Termux will close and come back by itself in about 30 seconds,
+and I'll continue. If it doesn't reopen, just open Termux." Then:
 ```bash
-bin/assistant start          # wake word listener + notification
-bin/assistant status
-tail -5 logs/wake.log        # "started model=hey_jarvis"
-bin/ask "say hello in one short sentence"   # should speak out loud (text in, no mic)
+./install.sh --yes </dev/null
 ```
-Self-test without the user talking. The phone's own speaker can trigger the wake word:
+The install runs on the phone's side, so it finishes after Termux is killed. It opens Termux:Boot once (that enables
+it), then reopens Termux. The new session restores this conversation with the prompt above.
+If you're still running after it finishes (Termux wasn't killed), run `bin/keepalive adopt --cancel` and go on.
+
+## E. Verify and start the assistant
+```bash
+cd ~/phone-assistant
+adb -s localhost:5555 shell pm list packages | grep termux    # termux, .api, .boot, .widget
+timeout 15 termux-wifi-connectioninfo | head -3             # Termux:API works (JSON)
+./install.sh </dev/null | tail -8                           # everything ✓
+bin/assistant start; sleep 10; tail -3 logs/wake.log         # "started model=hey_jarvis"
+bin/ask "say hello in one short sentence"                    # speaks out loud (no mic)
+```
+Self-test the whole voice path without the user talking. The phone's own speaker can trigger the wake word:
 ```bash
 termux-tts-speak -s MUSIC "Hey Jarvis, what is two plus two?"; sleep 15
 tail -3 logs/wake.log; tail -1 logs/hear.log; tail -2 logs/conversation.log
 ```
-Expect "wake detected", a transcript like 'What is 2+2?', and a CLAUDE: line. Then ask the user to try with their own
-voice: "Hey Jarvis, …" in one breath, with the screen locked too, and "stop" while it's talking (unlocked), or
-"Hey Jarvis" while it's talking (locked).
+Expect "wake detected", a transcript like 'What is 2+2?', and a CLAUDE: line. If termux-* commands hang, run
+`bin/heal-api` and retry.
 
-### F. Finish
-- Have the user add the Termux:Widget shortcuts to the home screen ("Talk to Claude", "Start assistant").
-- Mention `config.sh` (model, wake word, chime, autostart) and `ASSISTANT.local.md` (their own additions to the voice
-  instructions, not in git: e.g. folders or projects the voice assistant must not touch).
-- Optional: a reboot test. After the reboot, Termux and the assistant should come back on their own (Termux:Boot).
-  ADB over localhost needs Wireless debugging and Wi-Fi once after each reboot: `~/phone-assistant/bin/adb-self` (also linked as `~/bin/adb-self`).
+## F. Hand over
+Tell the user, briefly:
+- Say **"Hey Jarvis, …"** in one breath, even with the screen locked. To interrupt a reply, say "stop" (unlocked),
+  or "Hey Jarvis" (locked), or tap ⏹ in the notification.
+- Optional: home screen → long-press → Widgets → Termux:Widget → "Talk to Claude" / "Start assistant".
+- Their Termux sessions and Claude conversations now survive Android killing Termux and reboots.
+- Settings: `~/phone-assistant/config.sh` (model, wake word, chime, autostart). Their own extra voice instructions
+  (e.g. folders it must not touch) go in `~/phone-assistant/ASSISTANT.local.md`, which isn't in git.
+- After a reboot, ADB needs Wireless debugging + Wi-Fi once: run `adb-self` (or the assistant does it at boot when
+  Wi-Fi is on).
 
 ## Troubleshooting
 | Symptom | Fix |
 |---|---|
-| termux-* commands hang | Termux:API app missing or stuck: `bin/heal-api` (needs ADB) or force-stop Termux:API in Settings |
-| No speech heard by the wake listener | `pactl list short sources` should show `OpenSL_ES_source`; mic permission: `adb -s localhost:5555 shell pm grant com.termux android.permission.RECORD_AUDIO` |
-| `adb-self` "not found" | Wireless debugging off, or the phone changed Wi-Fi network: toggle it, re-run; re-pair if the pairing was reset |
-| Claude errors in `logs/claude-errors.log` | run `cd ~ && claude -p hi` to see if Claude itself works / is logged in |
+| termux-* commands hang | Termux:API missing or stuck: `bin/heal-api` (needs ADB), or force-stop Termux:API in Settings |
+| Wake listener hears nothing | `pactl list short sources` should list `OpenSL_ES_source`; mic: `adb -s localhost:5555 shell pm grant com.termux android.permission.RECORD_AUDIO` |
+| `adb-self` "not found" | Wireless debugging off, or a different Wi-Fi network: toggle it and re-run; re-pair if the pairing was reset |
+| add-on "signature doesn't match" | their Termux isn't from F-Droid or GitHub (e.g. Google Play): add-ons must come from the same source |
+| Claude errors in `logs/claude-errors.log` | `cd ~ && claude -p hi` to check Claude itself works / is signed in |
 | Sessions killed in the background | re-run `./install.sh </dev/null` (re-applies the Android settings) |
 
-Logs: `logs/` (wake, hear, speak, conversation, claude-errors). State: `state/`. Architecture: README.md.
+Logs: `logs/` (install, wake, hear, speak, conversation, claude-errors, keepalive). Architecture: README.md.
