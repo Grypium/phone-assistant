@@ -1,0 +1,10 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Turns screen off, records 6s via Termux:API, reports screen state mid-recording and volume.
+# Silenced (blocked) mic shows ~ -91 dB / -inf; a quiet real room is ~ -40..-60 dB.
+A="adb -s localhost:5555 shell"; F=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/logs/lockmic-$1.m4a; rm -f $F
+$A input keyevent KEYCODE_SLEEP; sleep 5
+echo "before: $($A dumpsys power | grep -o 'mWakefulness=[A-Za-z]*' | head -1)"
+termux-microphone-record -f $F -l 6 >/dev/null; sleep 3
+echo "during: $($A dumpsys power | grep -o 'mWakefulness=[A-Za-z]*' | head -1)"
+sleep 6; termux-microphone-record -q >/dev/null 2>&1
+ffmpeg -hide_banner -i $F -af volumedetect -f null - 2>&1 | grep -oE '(mean|max)_volume: [-0-9.inf]+ dB' || echo "no audio file"

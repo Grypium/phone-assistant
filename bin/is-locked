@@ -1,0 +1,7 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Exit 0 if the phone is locked (lock screen showing or screen off), 1 if unlocked, 2 if unknown (no ADB).
+A="adb -s localhost:5555 shell"
+$A true >/dev/null 2>&1 || exit 2
+$A dumpsys window 2>/dev/null | grep -qE 'isKeyguardShowing=true|mDreamingLockscreen=true' && exit 0
+$A dumpsys power 2>/dev/null | grep -q 'mWakefulness=Awake' || exit 0
+exit 1

@@ -1,0 +1,153 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# speak TEXT — say TEXT out loud and let the user interrupt it.
+# speak -    read the reply from stdin as NUL-terminated chunks while it's still being written (bin/claude-stream),
+#            so speaking starts with the first sentence. SPEAK_REPLY_FILE = the reply so far (for echo filtering).
+#   unlocked: say "stop" (or cancel / quiet / enough / never mind…)                    -> exit 10
+#   locked (or no ADB to tell): say the wake word, e.g. "Hey Jarvis" — interrupts and
+#   the caller should listen for a new request                                          -> exit 11
+#   either: the notification's "Stop talking" button (bin/shush)                        -> exit 10
+# Exit 0 = finished.
+#
+# How: one termux-tts-speak process is started right away and fed one line per chunk (sentences; long ones split at
+# commas). Starting a process per chunk cost ~1 s of silence before every sentence; this way the engine warms up while
+# Claude is still thinking. Meanwhile a listener runs:
+#  - unlocked: Android's speech recognizer, which mostly filters out the phone's own speaker. Echo cancellation
+#    isn't perfect, so words that belong to the reply are ignored when looking for "stop".
+#  - locked: the always-on wake word listener (Android's recognizer hangs on the lock screen).
+# Interrupting kills the Termux:API process (via ADB): the speech engine drops everything queued and goes quiet at
+# once, and the next TTS call starts it fresh. Without ADB the media volume is muted instead until the queue ends.
+# (Killing termux-tts-speak itself doesn't stop the audio; force-stopping the engine leaves Termux:API stuck.)
+P="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"; [ -f "$P/config.sh" ] && . "$P/config.sh"
+S="$P/state"; mkdir -p "$S"; FLAG="$S/stop-speaking"; SAVED="$S/muted-volume"; SHUSH="$S/shush"
+rm -f "$FLAG" "$SHUSH"
+
+STREAM=; [ "$*" = - ] && { STREAM=1; exec 3<&0; }
+text="$*"; [ -z "$STREAM" ] && [ -z "$text" ] && exit 0
+reply_so_far(){ if [ -n "$STREAM" ]; then cat "${SPEAK_REPLY_FILE:-/dev/null}" 2>/dev/null; else printf '%s' "$text"; fi; }
+killtree(){ local c; for c in $(pgrep -P "$1"); do killtree "$c"; done; kill "$1" 2>/dev/null; }
+dbg(){ echo "$(date '+%T.%3N') $*" >> "$P/logs/speak.log"; }
+music_vol(){ timeout 8 termux-volume 2>/dev/null | python3 -c "import sys,json;print([v['volume'] for v in json.load(sys.stdin) if v['stream']=='music'][0])" 2>/dev/null; }
+unmute(){
+  local v; v=$(cat "$SAVED" 2>/dev/null); rm -f "$SAVED"
+  [[ "$v" =~ ^[0-9]+$ ]] && timeout 8 termux-volume music "$v" >/dev/null 2>&1
+}
+unmute   # left muted by a crash last time? put it back
+
+# Is what the recognizer heard a request to stop? Words that are part of the reply (leaked echo) are dropped;
+# then it must contain a stop word with at most 1 other word around it ("okay stop", "stop talking please").
+is_stop(){
+  python3 - "$1" "$(reply_so_far)" <<'PY'
+import re, sys
+heard, reply = sys.argv[1].lower(), sys.argv[2].lower()
+core = {"stop", "cancel", "quiet", "enough", "hush", "shush", "nevermind"}
+filler = {"ok", "okay", "hey", "please", "it", "now", "talking", "that", "that's", "thats", "be", "shut", "up",
+          "never", "mind", "jarvis", "claude", "just", "alright", "all", "right"}
+heard = heard.replace("shut up", "quiet").replace("never mind", "nevermind")
+words = re.findall(r"[a-z']+", heard)
+reply_words = set(re.findall(r"[a-z']+", reply)) - core
+rest = [w for w in words if w in core or w in filler or w not in reply_words]
+others = [w for w in rest if w not in core and w not in filler]
+sys.exit(0 if any(w in core for w in rest) and len(others) <= 1 else 1)
+PY
+}
+
+interrupt(){  # $1 = why (stop|wake), $2 = what was heard
+  [ -f "$FLAG" ] && return
+  echo "$1" > "$FLAG"                                   # first: nothing more is fed to the engine
+  if ! "$P/bin/heal-api" >/dev/null 2>&1; then          # no ADB: mute until the engine's queue runs out
+    local v; v=$(music_vol); [[ "$v" =~ ^[1-9][0-9]*$ ]] && echo "$v" > "$SAVED"
+    timeout 8 termux-volume music 0 >/dev/null 2>&1
+  fi
+  termux-vibrate -d 120 >/dev/null 2>&1
+  dbg "INTERRUPT ($1): $2"
+  echo "$(date '+%F %T') interrupted ($1): $2" >> "$P/logs/conversation.log"
+}
+
+chunks(){
+  if [ -n "$STREAM" ]; then cat <&3; return; fi    # already chunked by bin/claude-stream
+  printf '%s' "$text" | python3 -c '
+import re,sys
+out = []
+for s in re.split(r"(?<=[.!?])\s+", sys.stdin.read().strip()):
+    if len(s.split()) <= 14:
+        out.append(s); continue
+    cur = ""                                   # long sentence: split at , ; : - into chunks of >= 6 words
+    for part in re.split(r"(?<=[,;:])\s+|\s+-\s+", s):
+        cur = (cur + " " + part).strip()
+        if len(cur.split()) >= 6:
+            out.append(cur); cur = ""
+    if cur:
+        if out and len(cur.split()) < 3: out[-1] += " " + cur
+        else: out.append(cur)
+for s in out:
+    if s.strip(): sys.stdout.write(s.strip() + "\0")'
+}
+
+# the speech engine: one process, one line per chunk; it exits once everything fed to it has been spoken
+FIFO="$S/tts.fifo"; rm -f "$FIFO"; mkfifo "$FIFO"
+termux-tts-speak -s MUSIC < "$FIFO" & tts=$!
+exec 4>"$FIFO"; rm -f "$FIFO"
+( chunks | while IFS= read -r -d '' s; do
+    [ -f "$FLAG" ] && break
+    printf '%s\n' "${s//$'\n'/ }" >&4
+    dbg "chunk: ${s:0:60}"
+  done ) & feed=$!
+exec 4>&-            # only the feeder holds the engine's input now: when it's done, the engine finishes and exits
+
+# the notification's "Stop talking" button
+( while kill -0 "$tts" 2>/dev/null; do
+    [ -f "$SHUSH" ] && { interrupt stop "(Stop talking button)"; break; }
+    sleep 0.15
+  done ) & btn=$!
+
+"$P/bin/is-locked"; locked=$?
+dbg "start: locked=$locked (0 locked,1 unlocked,2 unknown) -> listener=$([ $locked != 1 ] && echo wake-word || echo recognizer)"
+if [ $locked != 1 ]; then
+  if [ -f "$S/wake.pid" ] && kill -0 "$(cat "$S/wake.pid")" 2>/dev/null && [ ! -f "$S/wake-paused" ]; then
+    # the always-on wake listener (already loaded) keeps listening during the reply and flags an interrupt
+    rm -f "$S/wake-interrupt"; touch "$S/speaking-wake"
+    ( while kill -0 "$tts" 2>/dev/null; do
+        [ -f "$S/wake-interrupt" ] && { interrupt wake "${WAKE_MODEL:-hey_jarvis}"; break; }
+        sleep 0.15
+      done ) & lis=$!
+  else   # no listener running: start a one-off detector (takes several seconds to load)
+    ( "$P/bin/wait-wake" && interrupt wake "${WAKE_MODEL:-hey_jarvis}" ) & lis=$!
+  fi
+else
+  # -p streams partial results while you're still talking. Without it the recognizer only answers after a pause,
+  # and the reply leaking into the mic means there may be no pause until the current chunk ends.
+  ( while kill -0 "$tts" 2>/dev/null && [ ! -f "$FLAG" ]; do
+      timeout 12 termux-speech-to-text -p 2>/dev/null | while IFS= read -r heard; do
+        [ -z "${heard// }" ] && continue
+        dbg "heard: $heard"
+        if is_stop "$heard"; then interrupt stop "$heard"; break; fi
+      done
+    done ) & lis=$!
+fi
+
+# Wait for the engine to finish. Once interrupted, stop at once (with ADB it's already silent). If the engine hangs
+# (Termux:API sometimes does), give up after a generous estimate of the speaking time and restart Termux:API.
+fed_at=
+while kill -0 "$tts" 2>/dev/null; do
+  if [ -f "$FLAG" ]; then
+    [ -f "$SAVED" ] || break                            # silenced: done. Muted instead: let the queue drain
+  fi
+  if [ -z "$fed_at" ] && ! kill -0 "$feed" 2>/dev/null; then
+    fed_at=$SECONDS; words=$(reply_so_far | wc -w)
+  fi
+  if [ -n "$fed_at" ] && [ $((SECONDS - fed_at)) -gt $(( words / 2 + 8 )) ]; then
+    dbg "engine hung: restarting Termux:API"; "$P/bin/heal-api"; break
+  fi
+  sleep 0.1
+done
+killtree "$feed"; exec 3<&- 0</dev/null   # streaming: closing our input makes bin/claude-stream stop Claude
+killtree "$tts"; killtree "$lis"; killtree "$btn"; wait 2>/dev/null; sleep 0.2   # free the recognizer
+rm -f "$S/speaking-wake" "$S/wake-interrupt" "$SHUSH"
+unmute
+if [ -f "$FLAG" ]; then
+  why=$(cat "$FLAG"); rm -f "$FLAG"
+  [ "$why" = wake ] && exit 11          # caller listens for the new request right away (it plays the chime)
+  paplay "$P/assets/stopped.wav" 2>/dev/null
+  exit 10
+fi
+exit 0

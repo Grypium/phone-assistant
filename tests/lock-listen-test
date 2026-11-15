@@ -1,0 +1,13 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Hands-off test: starts a 60s recording while unlocked, logs screen state every 3s,
+# then reports volume per 6s slice. Talk loudly when the phone says "now talk".
+A="adb -s localhost:5555 shell"; L=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/logs; F=$L/lock-listen.m4a; S=$L/lock-listen-states.txt; rm -f $F $S
+termux-tts-speak "Starting. Lock the phone and set it down."; 
+termux-microphone-record -f $F -l 60 >/dev/null
+for i in $(seq 0 3 57); do echo "$i $($A dumpsys power | grep -o 'mWakefulness=[A-Za-z]*' | head -1 | cut -d= -f2)" >> $S; [ $i = 30 ] && termux-vibrate -d 800; sleep 3; done
+sleep 4; termux-microphone-record -q >/dev/null 2>&1
+echo "sec  screen  mean_dB"
+for t in $(seq 0 6 54); do
+  v=$(ffmpeg -hide_banner -ss $t -t 6 -i $F -af volumedetect -f null - 2>&1 | grep -oE 'mean_volume: [-0-9.inf]+' | awk '{print $2}')
+  echo "$t  $(awk -v t=$t '$1==t{print $2}' $S)  $v"
+done

@@ -1,0 +1,5 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Restart Termux:API's process (it restarts itself on the next termux-* call). Fixes a stuck TTS/STT service.
+pid=$(adb -s localhost:5555 shell pidof com.termux.api 2>/dev/null | tr -d '\r')
+[ -z "$pid" ] && pid=$(pidof com.termux.api 2>/dev/null)
+[ -n "$pid" ] && kill "$pid" 2>/dev/null && echo "$(date '+%F %T') restarted Termux:API (pid $pid)" >> "$HOME/phone-assistant/logs/conversation.log"

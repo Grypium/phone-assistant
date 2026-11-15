@@ -1,0 +1,4 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Stop the assistant talking right now (the notification's "Stop talking" button). No-op if it isn't talking.
+S="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/state"
+touch "$S/shush"; sleep 3; rm -f "$S/shush"   # bin/speak polls for it; clear it so it can't hit the next reply

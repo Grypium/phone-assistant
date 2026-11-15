@@ -1,0 +1,137 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""hear — record one spoken command and print the transcript (empty if nothing was said).
+
+Works with the screen locked (Android's own recognizer doesn't): mic -> PulseAudio OpenSL ES source -> ffmpeg 16 kHz
+-> end-of-speech detection -> whisper.cpp (offline). Exit 0 always; empty output = nothing heard.
+
+Env: WHISPER_MODEL (base.en), HEAR_START_TIMEOUT (6 s to start talking), HEAR_MAX (20 s),
+     HEAR_END_SILENCE (0.8 s of quiet ends the command).
+  hear                      record, then transcribe
+  hear --file WAV           transcribe an existing recording (the wake listener records "Hey Jarvis, <request>")
+  hear --file WAV --strip-wake   ...and drop a leading "Hey Jarvis" from the text
+"""
+import os, re, subprocess, sys, time, wave
+import numpy as np
+
+P = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+W = os.path.join(P, "vendor", "whisper.cpp")
+MODEL = os.environ.get("WHISPER_MODEL", "base.en")
+START_TIMEOUT = float(os.environ.get("HEAR_START_TIMEOUT", "6"))
+MAX_LEN = float(os.environ.get("HEAR_MAX", "20"))
+END_SIL = float(os.environ.get("HEAR_END_SILENCE", "0.8"))
+RATE, FRAME = 16000, 480            # 30 ms frames
+OUT = os.path.join(P, "state", "last-command.wav")
+
+
+sys.path.insert(0, os.path.join(P, "lib"))
+import warnings; warnings.filterwarnings("ignore")
+
+
+def log(msg):
+    with open(os.path.join(P, "logs", "hear.log"), "a") as f:
+        f.write(time.strftime("%F %T ") + msg + "\n")
+
+
+def sh(cmd):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
+
+
+def record():
+    from openwakeword.vad import VAD as _VAD      # loaded only when recording (--file mode doesn't need it)
+    VAD = _VAD()
+    if subprocess.run("pulseaudio --check", shell=True).returncode != 0:
+        sh("pulseaudio --start --exit-idle-time=-1"); time.sleep(0.8)
+    if "OpenSL_ES_source" not in sh("pactl list short sources"):
+        sh("pactl load-module module-sles-source")
+    parec = subprocess.Popen(["parec", "-d", "OpenSL_ES_source", "--raw", "--format=s16le", "--rate=44100", "--channels=2"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    ff = subprocess.Popen(["ffmpeg", "-v", "error", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "-",
+                           "-ar", str(RATE), "-ac", "1", "-f", "s16le", "-"],
+                          stdin=parec.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    parec.stdout.close()
+    frames = []
+    started = None; last_voice = None; run = 0; peak = 0.0
+    try:
+        while True:
+            buf = ff.stdout.read(FRAME * 2)
+            if len(buf) < FRAME * 2:
+                break
+            frames.append(buf); now = len(frames) * FRAME / RATE
+            # Silero VAD (shipped with openWakeWord): speech probability for this 30 ms frame. Unlike a loudness
+            # threshold it doesn't need a quiet moment first, so talking right after the chime still works.
+            prob = float(VAD.predict(np.frombuffer(buf, np.int16)))
+            peak = max(peak, prob)
+            if prob >= 0.5:
+                run += 1; last_voice = now
+                if started is None and run >= 3:            # ~90 ms of speech = you started talking
+                    started = now - 0.09
+            elif prob < 0.3:
+                run = 0
+            if started is None and now > START_TIMEOUT:
+                break
+            if started is not None and now - last_voice > END_SIL:
+                break
+            if now > MAX_LEN:
+                break
+    finally:
+        for p in (parec, ff):
+            try: p.kill()
+            except Exception: pass
+    log(f"recorded {len(frames) * FRAME / RATE:.1f}s, peak speech prob {peak:.2f}, "
+        + (f"speech from {started:.1f}s" if started is not None else "no speech"))
+    if started is None:
+        return None
+    keep = frames[max(0, int((started - 0.4) * RATE / FRAME)):]   # include 0.4 s before speech began
+    with wave.open(OUT, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(RATE); w.writeframes(b"".join(keep))
+    return OUT
+
+
+def audio_ctx(path):
+    """Whisper always encodes 30 s of audio; a short command only needs ~50 frames per second of it.
+    Shrinking the context cut transcription of a 2.4 s command from 1.1 s to 0.4 s with the same text."""
+    try:
+        with wave.open(path) as w:
+            dur = w.getnframes() / w.getframerate()
+    except Exception:
+        return 0
+    if dur > 25:
+        return 0                                         # 0 = full context
+    return max(256, min(1500, (int(dur * 50) + 128 + 63) // 64 * 64))
+
+
+def transcribe(path):
+    env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(W, "build", "bin"))
+    out = subprocess.run([os.path.join(W, "build", "bin", "whisper-cli"), "-m",
+                          os.path.join(W, "models", f"ggml-{MODEL}.bin"), "-f", path, "-t", "6",
+                          "-ac", str(audio_ctx(path)), "-nt", "-np", "-l", "en"],
+                         capture_output=True, text=True, env=env).stdout
+    text = " ".join(out.split())
+    text = re.sub(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*", "", text).strip()     # [BLANK_AUDIO], (wind), *music*
+    if re.fullmatch(r"(?i)(thank you\.?|thanks for watching!?|you|\.|)", text):
+        return ""                                                             # common hallucinations on noise
+    return text
+
+
+WAKE_PREFIX = re.compile(r"(?i)^\W*(?:(?:hey|hi|okay|ok|a)\W+)?(?:jarvis|jarvas|jervis|javis|travis|davis|vis)\b\W*")
+
+
+def strip_wake(text):
+    out = WAKE_PREFIX.sub("", text, count=1).strip()
+    return out[:1].upper() + out[1:] if out else ""
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if "--file" in args:
+        wav = args[args.index("--file") + 1]
+        text = transcribe(wav) if os.path.exists(wav) else ""
+        if "--strip-wake" in args:
+            text = strip_wake(text)
+            if not re.search(r"[A-Za-z0-9]", text):
+                text = ""
+    else:
+        wav = record()
+        text = transcribe(wav) if wav else ""
+    log(f"transcript: {text!r}")
+    print(text)

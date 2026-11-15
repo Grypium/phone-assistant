@@ -1,0 +1,128 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""Helper for the `claude` shell wrapper (shell/termux-init.sh).
+
+Usage: claude-args ARG...
+Exit 3  -> not an interactive session we should track (print mode, --help, subcommand): run claude as-is.
+Exit 0  -> prints 3 lines:
+  1. conversation id this session will use: a UUID, "continue" (unknown, reopen with --continue), or empty
+     (no id given: the wrapper generates one and adds --session-id)
+  2. the flags to replay on restore, shell-quoted (every option and its values; minus the prompt and
+     minus --resume/--continue/--session-id/--fork-session, which restore adds itself)
+  3. the argument list to actually run now, shell-quoted (same as given, except `-c` is turned into
+     `--resume <id>` when we can tell which conversation it would continue, and forks get a fixed id)
+
+Which options take values is read from `claude --help` (cached for 7 days in state/claude-opts.json),
+so new Claude Code options are handled without changes here.
+"""
+import json, os, re, shlex, subprocess, sys, time, uuid, glob
+
+P = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CACHE = os.path.join(P, "state", "claude-opts.json")
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+SUBCOMMANDS = {"mcp", "config", "update", "doctor", "install", "plugin", "plugins", "agents",
+               "setup-token", "migrate-installer", "auth", "upgrade"}
+PASSTHROUGH = {"-p", "--print", "-v", "--version", "-h", "--help"}
+OUR_OPTS = {"-r", "--resume", "-c", "--continue", "--session-id", "--fork-session"}
+
+
+def load_opts():
+    """{option: 'none' | 'one' | 'many' | 'optional'} parsed from claude --help."""
+    try:
+        if time.time() - os.path.getmtime(CACHE) < 7 * 86400:
+            return json.load(open(CACHE))
+    except OSError:
+        pass
+    try:
+        txt = subprocess.run(["claude", "--help"], capture_output=True, text=True,
+                             cwd=os.path.expanduser("~"), timeout=60).stdout
+    except Exception:
+        txt = ""
+    opts = {}
+    for line in txt.splitlines():
+        m = re.match(r"^ {2,4}((?:-\w, )?--[\w-]+(?:, --[\w-]+)?)(?:\s+(<[^>]*>|\[[^\]]*\]))?", line)
+        if not m:
+            continue
+        names = re.findall(r"--?[\w-]+", m.group(1))
+        v = m.group(2) or ""
+        kind = "none"
+        if v.startswith("<"):
+            kind = "many" if v.endswith("...>") else "one"
+        elif v.startswith("["):
+            kind = "optional"
+        for n in names:
+            opts.setdefault(n, kind)
+    if opts:
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        json.dump(opts, open(CACHE, "w"))
+    return opts
+
+
+def latest_session_for_cwd():
+    """The conversation `claude --continue` would pick in this folder."""
+    proj = re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
+    files = glob.glob(os.path.expanduser(f"~/.claude/projects/{proj}/*.jsonl"))
+    files = [f for f in files if UUID_RE.match(os.path.basename(f)[:-6])]
+    return os.path.basename(max(files, key=os.path.getmtime))[:-6] if files else None
+
+
+def main(argv):
+    if not argv:
+        print("\n\n"); return 0
+    if argv[0] in SUBCOMMANDS or any(a in PASSTHROUGH for a in argv):
+        return 3
+    opts = load_opts()
+    keep, sid, resume, cont, fork = [], None, None, False, False
+    i, n = 0, len(argv)
+    while i < n:
+        a = argv[i]
+        if a == "--":
+            break                                   # the rest is the prompt
+        name, eq, val = a.partition("=")
+        if a.startswith("-") and len(a) > 1:
+            if name in ("-r", "--resume"):
+                if eq: resume = val
+                elif i + 1 < n and UUID_RE.match(argv[i + 1]): resume = argv[i + 1]; i += 1
+                else: resume = "picker"
+            elif name in ("-c", "--continue"): cont = True
+            elif name == "--session-id":
+                if eq: sid = val
+                elif i + 1 < n: sid = argv[i + 1]; i += 1
+            elif name == "--fork-session": fork = True
+            else:
+                kind = opts.get(name, "none")
+                keep.append(a)
+                if not eq:
+                    if kind == "one" and i + 1 < n:
+                        keep.append(argv[i + 1]); i += 1
+                    elif kind in ("many", "optional"):
+                        while i + 1 < n and not argv[i + 1].startswith("-"):
+                            keep.append(argv[i + 1]); i += 1
+                            if kind == "optional": break
+        # else: positional = the prompt; run it now, but don't replay it on restore
+        i += 1
+
+    run = list(argv)
+    if fork and (resume or cont):
+        sid = sid or str(uuid.uuid4())             # a fork gets a new id; pin it so we can find it again
+        if "--session-id" not in run: run[:0] = ["--session-id", sid]
+        conv = sid
+    elif resume and resume != "picker":
+        conv = resume
+    elif cont or resume == "picker":
+        conv = None
+        if cont:
+            conv = latest_session_for_cwd()
+            if conv:                               # make -c explicit so we know exactly what's open
+                run = [x for x in run if x not in ("-c", "--continue")]
+                run[:0] = ["--resume", conv]
+        conv = conv or "continue"
+    else:
+        conv = sid or ""
+    print(conv)
+    print(shlex.join(keep))
+    print(shlex.join(run))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

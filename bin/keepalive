@@ -1,0 +1,157 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Bring Termux sessions back after Android kills Termux or the phone reboots.
+#
+# Every interactive Termux shell runs inside tmux (see shell/termux-init.sh). This script keeps a snapshot
+# of the tmux windows (name, folder, and the Claude conversation running there, if any) and recreates
+# them later, reopening each Claude conversation with `claude --resume <id>`.
+#
+#   keepalive save            snapshot now (no-op if tmux isn't running)
+#   keepalive restore         recreate sessions from the snapshot, if tmux isn't already running
+#   keepalive open-tabs [S]   open a Termux tab for each session no tab is showing (except session S)
+#   keepalive ensure-daemon   start the background saver (snapshots every 15 s while tmux runs)
+#   keepalive clear           forget the snapshot (used after you close sessions on purpose)
+#   keepalive show            print the snapshot
+P="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"; [ -f "$P/config.sh" ] && . "$P/config.sh"
+S="$P/state"; mkdir -p "$S" "$P/logs"
+SNAP="$S/sessions.tsv"; PIDF="$S/keepalive.pid"; LOG="$P/logs/keepalive.log"
+SEP=$'\x1f'
+log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+save(){
+  tmux has-session 2>/dev/null || return 0
+  local tmp="$SNAP.tmp"
+  # one line per window: session, window index, window name, folder of active pane, claude conversation id,
+  # claude flags (shell-quoted)
+  tmux list-windows -a -F "#{session_name}${SEP}#{window_index}${SEP}#{window_name}${SEP}#{pane_current_path}${SEP}#{@claude_session}${SEP}#{@claude_args}${SEP}#{pane_id}" > "$tmp.raw" 2>/dev/null \
+    && python3 - "$tmp.raw" "$P/bin/claude-args" > "$tmp" <<'PY' && mv "$tmp" "$SNAP"
+# Prefer what Claude Code itself reports: ~/.claude/sessions/<pid>.json has the live conversation id and the
+# tmux pane it runs in; /proc/<pid>/cmdline has the real flags. Fall back to the wrapper's tags otherwise.
+import glob, json, os, subprocess, sys
+SEP = "\x1f"
+live = {}
+for f in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
+    try:
+        d = json.load(open(f)); pid = int(d["pid"])
+        os.kill(pid, 0)
+        pane = str(d.get("tmux", "")).rpartition(".")[2]          # "1:@1.%1" -> "%1"
+        if pane.startswith("%") and d.get("sessionId") and d.get("kind", "interactive") == "interactive":
+            argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[1:]
+            argv = [a.decode() for a in argv if a]
+            out = subprocess.run([sys.argv[2], *argv], capture_output=True, text=True)
+            flags = out.stdout.split("\n")[1] if out.returncode == 0 else None
+            live[pane] = (d["sessionId"], flags)
+    except Exception:
+        pass
+for line in open(sys.argv[1]):
+    f = line.rstrip("\n").split(SEP)
+    if len(f) < 7: continue
+    if f[6] in live:
+        sid, flags = live[f[6]]
+        f[4] = sid
+        if flags is not None: f[5] = flags
+    print(SEP.join(f[:6]))
+PY
+  rm -f "$tmp.raw"
+}
+
+running_conv(){  # is conversation $1 open in a live claude process?
+  pgrep -f -- "$1" >/dev/null && return 0
+  local f; for f in "$HOME"/.claude/sessions/*.json; do
+    [ -f "$f" ] && grep -q -- "$1" "$f" && kill -0 "$(basename "$f" .json)" 2>/dev/null && return 0
+  done; return 1
+}
+
+restore(){
+  [ "${RESTORE_SESSIONS:-1}" = 1 ] || return 0
+  tmux has-session 2>/dev/null && return 0          # already running, nothing to do
+  [ -s "$SNAP" ] || return 0
+  log "restoring $(wc -l < "$SNAP") window(s)"
+  local sess idx name dir cid flags cmd win
+  while IFS="$SEP" read -r sess idx name dir cid flags; do
+    [ -d "$dir" ] || dir="$HOME"
+    if tmux has-session -t "=$sess" 2>/dev/null; then
+      win=$(tmux new-window -d -P -F '#{window_id}' -t "=$sess:" -c "$dir")
+    else
+      win=$(tmux new-session -d -P -F '#{window_id}' -s "$sess" -c "$dir")
+    fi
+    cmd=""
+    # never open a second copy of a conversation that's still running somewhere (e.g. outside tmux)
+    if [ -n "$cid" ] && [ "$cid" != continue ] && running_conv "$cid"; then
+      log "  $sess: $cid is already running elsewhere, not reopening"; cid=""
+    fi
+    case "$cid" in
+      "") ;;
+      continue) cmd="claude${flags:+ $flags} --continue" ;;
+      *) cmd="claude${flags:+ $flags} --resume $cid" ;;
+    esac
+    if [ -n "$cmd" ]; then
+      [ "${AUTO_CONTINUE_AGENTS:-0}" = 1 ] && \
+        cmd="$cmd \"Termux was killed and this session was restored. Pick up where you left off.\""
+      tmux send-keys -t "$win" "$cmd" Enter
+      log "  $sess:$name in $dir -> $cmd"
+    else
+      log "  $sess:$name in $dir"
+    fi
+  done < "$SNAP"
+}
+
+# Give every tmux session that no tab is showing its own Termux tab (in creation order), so after a
+# reboot/kill your tabs come back as they were. Termux only starts a tab's program once the tab is shown,
+# so each session is marked @pa_tab_pending until its tab attaches; new tabs prefer other sessions.
+# Needs `allow-external-apps = true` in ~/.termux/termux.properties and "Appear on top" for Termux.
+open_tabs(){
+  local skip="${1:-}" att pend _c name
+  tmux list-sessions -F '#{session_attached} #{?@pa_tab_pending,1,0} #{session_created} #{session_name}' 2>/dev/null \
+    | sort -k3,3n | while read -r att pend _c name; do
+      [ "$att" = 0 ] && [ "$pend" = 0 ] && [ "$name" != "$skip" ] || continue
+      tmux set -t "=$name:" @pa_tab_pending 1 </dev/null
+      am startservice --user 0 -n com.termux/com.termux.app.TermuxService -a com.termux.service_execute \
+        -d "file://$PREFIX/bin/bash" --esa com.termux.execute.arguments "-c,'$P/bin/keepalive' _tab '$name'" \
+        --es com.termux.execute.cwd "$HOME" --ez com.termux.execute.background false \
+        --es com.termux.execute.session_action 3 </dev/null >/dev/null 2>&1
+      log "  opened a Termux tab for session $name"
+    done
+}
+
+# What a tab opened by open_tabs runs.
+tab(){
+  local name="$1"
+  if tmux has-session -t "=$name" 2>/dev/null &&
+     [ "$(tmux display -p -t "=$name:" '#{session_attached}')" = 0 ]; then
+    tmux set -ut "=$name:" @pa_tab_pending
+    if tmux attach -t "=$name"; then
+      tmux has-session 2>/dev/null || "$0" clear   # you closed the last session: don't restore it
+      exit 0
+    fi
+  fi
+  exec bash -l    # session gone or already shown elsewhere: behave like a normal new tab
+}
+
+daemon(){
+  echo $$ > "$PIDF"
+  for _ in $(seq 1 30); do tmux has-session 2>/dev/null && break; sleep 1; done
+  while tmux has-session 2>/dev/null; do
+    save
+    # watchdog: restart the voice assistant if it died (but not if you stopped it)
+    if [ "${ASSISTANT_AUTOSTART:-1}" = 1 ] && [ ! -f "$S/assistant-stopped" ] && \
+       ! { [ -f "$S/wake.pid" ] && kill -0 "$(cat "$S/wake.pid")" 2>/dev/null; }; then
+      log "voice assistant wasn't running, restarting"; "$P/bin/assistant" start >/dev/null 2>&1
+    fi
+    sleep 15
+  done
+  rm -f "$PIDF"
+}
+
+case "$1" in
+  save) save ;;
+  restore) restore ;;
+  open-tabs) open_tabs "${2:-}" ;;
+  _tab) tab "$2" ;;
+  ensure-daemon)
+    [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null && exit 0
+    nohup setsid "$0" _daemon >/dev/null 2>&1 & ;;
+  _daemon) daemon ;;
+  clear) rm -f "$SNAP"; log "snapshot cleared (sessions closed on purpose)" ;;
+  show) [ -s "$SNAP" ] && tr "$SEP" '\t' < "$SNAP" || echo "(no snapshot)" ;;
+  *) sed -n '2,13p' "$0" ;;
+esac

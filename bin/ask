@@ -1,0 +1,78 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# One voice exchange with Claude.  Usage: ask              (listen with the mic)
+#                                         ask "some text"   (skip listening)
+#                                         ask --audio WAV   (already recorded by the wake listener: "Hey Jarvis, ...")
+# Claude's reply is spoken while it's still being written (bin/claude-stream | bin/speak -).
+# Follows up automatically while Claude's reply ends with a question (max 4 turns).
+P="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"; [ -f "$P/config.sh" ] && . "$P/config.sh"
+L="$P/logs"; S="$P/state"; mkdir -p "$L" "$S"
+MODEL="${ASSISTANT_MODEL:-sonnet}"
+SESSION_IDLE=1800   # start a fresh conversation after 30 min of quiet
+
+exec 9>"$S/ask.lock"; flock -n 9 || { termux-toast "Already listening" 2>/dev/null; exit 0; }
+touch "$S/busy"; trap 'rm -f "$S/busy"' EXIT
+audio=; [ "$1" = --audio ] && { audio="$2"; shift 2; }
+[ -z "$audio" ] && [ -z "$*" ] && pgrep -x parec >/dev/null && sleep 0.5   # let the wake listener release the mic
+
+log(){ echo "$(date '+%F %T') $*" >> "$L/conversation.log"; }
+# The notification takes ~0.5 s to update: do it in the background, in order, never in the way.
+status(){ ( flock 8; "$P/bin/assistant" notify "$1" >/dev/null 2>&1 ) 8>"$S/notify.lock" & }
+ack(){   # tell the user we're listening: ASSISTANT_ACK = chime (default) | voice | vibrate | off
+  case "${ASSISTANT_ACK:-chime}" in
+    off) ;;
+    vibrate) termux-vibrate -d 70 -f >/dev/null 2>&1 ;;
+    voice) termux-tts-speak -s MUSIC "${ASSISTANT_ACK_TEXT:-Yes?}" ;;
+    *) termux-vibrate -d 50 -f >/dev/null 2>&1 &
+       { pulseaudio --check || pulseaudio --start --exit-idle-time=-1; } 2>/dev/null
+       paplay "$P/assets/listening.wav" 2>/dev/null; wait ;;
+  esac
+}
+listen(){
+  ack
+  # whisper (default): offline, works with the phone locked. android: Google's recognizer, unlocked only.
+  if [ "${STT_ENGINE:-whisper}" = android ]; then
+    timeout 25 termux-speech-to-text 2>/dev/null | sed '/^\s*$/d' | tail -1
+  else
+    "$P/bin/hear"
+  fi
+}
+
+# Conversation session: reuse within SESSION_IDLE, else start new.
+now=$(date +%s); last=$(cat "$S/last-ask" 2>/dev/null || echo 0)
+if [ -s "$S/session-id" ] && [ $((now-last)) -lt $SESSION_IDLE ]; then
+  sess=(--resume "$(cat "$S/session-id")")
+else
+  cat /proc/sys/kernel/random/uuid > "$S/session-id"; sess=(--session-id "$(cat "$S/session-id")")
+fi
+
+text="$*"
+if [ -n "$audio" ]; then
+  status "✍ Transcribing…"
+  text=$("$P/bin/hear" --file "$audio" --strip-wake)
+  [ -z "$text" ] && { status "Ready"; termux-vibrate -d 40 >/dev/null 2>&1; exit 0; }
+fi
+REPLY_FILE="$S/reply.txt"
+for turn in 1 2 3 4 5 6; do
+  if [ -z "$text" ]; then
+    status "🎤 Listening…"; text=$(listen)
+    [ -z "$text" ] && { status "Ready"; [ $turn = 1 ] && termux-vibrate -d 40 >/dev/null 2>&1; exit 0; }
+  fi
+  log "YOU: $text"; status "💭 $text"
+  printf '%s' "$text" | "$P/bin/claude-stream" "$REPLY_FILE" -- timeout 180 claude -p --model "$MODEL" "${sess[@]}" \
+      --append-system-prompt "$(cat "$P/ASSISTANT.md" "$P/ASSISTANT.local.md" 2>/dev/null)" \
+      --allowedTools "Bash,Read,Write,Edit,Glob,Grep,WebSearch,WebFetch" 2>>"$L/claude-errors.log" |
+    SPEAK_REPLY_FILE="$REPLY_FILE" "$P/bin/speak" -
+  ps=("${PIPESTATUS[@]}"); crc=${ps[1]}; rc=${ps[2]}
+  reply=$(sed 's/ $//' "$REPLY_FILE" 2>/dev/null)
+  if [ "$crc" = 1 ]; then
+    rm -f "$S/session-id" "$S/last-ask"   # don't try to resume a conversation that never started
+    cat /proc/sys/kernel/random/uuid > "$S/session-id"; sess=(--session-id "$(cat "$S/session-id")")
+  elif ls "$HOME"/.claude/projects/*/"$(cat "$S/session-id").jsonl" >/dev/null 2>&1; then
+    sess=(--resume "$(cat "$S/session-id")"); date +%s > "$S/last-ask"
+  fi                                      # (interrupted before Claude saved anything: keep --session-id)
+  log "CLAUDE: $reply"; status "🗣 $reply"
+  [ $rc = 10 ] && { status "Stopped"; break; }   # you said "stop"
+  [ $rc = 11 ] && { text=""; continue; }         # you said the wake word over it: listen for the new request
+  case "$reply" in *\?) text="";; *) break;; esac
+done
+status "Ready"

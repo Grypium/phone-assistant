@@ -1,0 +1,53 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Control the voice assistant.
+#   assistant start        start wake word listener + notification (keeps phone awake for Termux)
+#   assistant stop         stop everything
+#   assistant status
+#   assistant wake on|off|toggle
+#   assistant notify TEXT  (internal) refresh the notification
+P="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"; [ -f "$P/config.sh" ] && . "$P/config.sh"
+S="$P/state"; L="$P/logs"; mkdir -p "$S" "$L"
+PIDF="$S/wake.pid"
+running(){ [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
+killtree(){ local c; for c in $(pgrep -P "$1"); do killtree "$c"; done; kill "$1" 2>/dev/null; }
+
+notify(){
+  local wake="off"; running && [ ! -f "$S/wake-paused" ] && wake="on"
+  termux-notification --id assistant --ongoing --priority high \
+    --title "Claude assistant · wake word $wake" --content "${1:-Ready}" \
+    --action "$P/bin/ask" \
+    --button1 "🎤 Talk"          --button1-action "$P/bin/ask" \
+    --button2 "⏹ Stop talking"  --button2-action "$P/bin/shush" \
+    --button3 "Off"             --button3-action "$P/bin/assistant stop"
+}
+
+case "$1" in
+  start)
+    termux-wake-lock
+    rm -f "$S/wake-paused" "$S/busy" "$S/assistant-stopped"
+    if ! running; then
+      nohup setsid python3 "$P/bin/wake-listener.py" >> "$L/wake.log" 2>&1 &
+      echo $! > "$PIDF"
+    fi
+    notify "Ready. Say \"Hey Jarvis\" or tap Talk."; echo "started (pid $(cat "$PIDF"))" ;;
+  stop)
+    running && killtree "$(cat "$PIDF")"   # the listener and its parec/ffmpeg, by PID only
+    rm -f "$PIDF"; termux-notification-remove assistant; termux-wake-unlock
+    touch "$S/assistant-stopped"   # stopped on purpose: the keepalive watchdog leaves it off
+    echo "$(date '+%F %T') stopped (assistant stop)" >> "$L/wake.log"; echo stopped ;;
+  status)
+    running && echo "listener running (pid $(cat "$PIDF"))" || echo "listener not running"
+    [ -f "$S/wake-paused" ] && echo "wake word paused"; tail -3 "$L/wake.log" 2>/dev/null ;;
+  wake)
+    if ! running; then
+      "$0" start >/dev/null; [ "$2" = off ] && touch "$S/wake-paused"
+    else
+      case "$2" in
+        on) rm -f "$S/wake-paused";; off) touch "$S/wake-paused";;
+        *) if [ -f "$S/wake-paused" ]; then rm -f "$S/wake-paused"; else touch "$S/wake-paused"; fi;;
+      esac
+    fi
+    notify "Ready" ;;
+  notify) shift; notify "$*" ;;
+  *) sed -n '2,8p' "$0" ;;
+esac

@@ -1,0 +1,30 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Get ADB connected to this phone. Prefers localhost:5555 (works without Wi-Fi once armed
+# with `adb tcpip 5555`; resets on reboot). Falls back to scanning for the Wireless debugging port.
+# Usage: adb-self [WIFI_IP]   (IP defaults to the phone's own Wi-Fi address via Termux:API)
+for d in $(adb devices | awk '/offline/{print $1}'); do adb disconnect "$d" >/dev/null; done
+adb devices | grep -q $'\tdevice$' && { adb devices | awk -F'\t' '$2=="device"{print "already connected: "$1}'; exit 0; }
+adb connect localhost:5555 2>&1 | grep -q '^connected' && adb -s localhost:5555 get-state >/dev/null 2>&1 && { echo "connected localhost:5555"; exit 0; }
+adb disconnect localhost:5555 >/dev/null 2>&1
+IP=${1:-$("$(dirname "$(readlink -f "$0")")/wifi-ip")}
+[ -z "$IP" ] && { echo "no Wi-Fi and localhost:5555 not armed (reboot?) - join Wi-Fi, enable Wireless debugging, rerun"; exit 1; }
+for p in $(python3 - "$IP" <<'PY'
+import socket,sys,concurrent.futures as cf
+ip=sys.argv[1]
+def t(p):
+    s=socket.socket();s.settimeout(0.3)
+    try: s.connect((ip,p)); return p
+    except Exception: return None
+    finally: s.close()
+with cf.ThreadPoolExecutor(400) as ex: print(*[p for p in ex.map(t,range(30000,65536)) if p])
+PY
+); do
+  if adb connect "$IP:$p" 2>&1 | grep -q '^connected' && adb -s "$IP:$p" get-state >/dev/null 2>&1; then
+    echo "connected $IP:$p — arming localhost:5555"
+    adb -s "$IP:$p" tcpip 5555 >/dev/null; sleep 3; adb connect localhost:5555 >/dev/null
+    for d in $(adb devices | awk '/offline/{print $1}'); do adb disconnect "$d" >/dev/null; done
+    exit 0
+  fi
+  adb disconnect "$IP:$p" >/dev/null 2>&1
+done
+echo "not found - is Wireless debugging on? (pair again if it was reset)"; exit 1

@@ -1,0 +1,32 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""wait-wake — block until the wake word is heard (exit 0), or until killed. Used to interrupt replies while the
+phone is locked (Android's recognizer can't listen then). Same pipeline as wake-listener.py."""
+import os, subprocess, sys, time, warnings
+warnings.filterwarnings("ignore")
+P = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(P, "lib"))
+import numpy as np
+from openwakeword.model import Model
+
+MODEL = os.environ.get("WAKE_MODEL", "hey_jarvis")
+THRESH = float(os.environ.get("WAKE_THRESHOLD", "0.6"))
+m = Model(wakeword_models=[MODEL], inference_framework="onnx")
+parec = subprocess.Popen(["parec", "-d", "OpenSL_ES_source", "--raw", "--format=s16le", "--rate=44100", "--channels=2"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+ff = subprocess.Popen(["ffmpeg", "-v", "error", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "-",
+                       "-ar", "16000", "-ac", "1", "-f", "s16le", "-"], stdin=parec.stdout, stdout=subprocess.PIPE,
+                      stderr=subprocess.DEVNULL)
+parec.stdout.close()
+n = 0
+try:
+    while True:
+        buf = ff.stdout.read(2560)
+        if len(buf) < 2560:
+            sys.exit(1)
+        n += 1
+        if float(m.predict(np.frombuffer(buf, np.int16))[MODEL]) >= THRESH and n > 20:
+            sys.exit(0)
+finally:
+    for p in (parec, ff):
+        try: p.kill()
+        except Exception: pass

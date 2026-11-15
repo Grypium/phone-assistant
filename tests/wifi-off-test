@@ -1,0 +1,13 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Waits for Wi-Fi to drop, then checks ADB over localhost and reports via notification + voice.
+LOG=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/logs/wifi-off-test.log; echo "$(date) waiting for wifi off" > $LOG
+while [ -n "$($(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/bin/wifi-ip)" ]; do sleep 3; done
+echo "$(date) wifi is off" >> $LOG; sleep 5
+if adb -s localhost:5555 shell echo ok 2>>$LOG | grep -q ok && adb -s localhost:5555 exec-out screencap -p > $(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/logs/nowifi.png && [ -s $(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/logs/nowifi.png ]; then
+  R="Success. ADB still works with Wi-Fi off."
+else
+  adb connect localhost:5555 >>$LOG 2>&1; sleep 2
+  adb -s localhost:5555 shell echo ok 2>>$LOG | grep -q ok && R="Success after reconnect. ADB works with Wi-Fi off." || R="ADB failed with Wi-Fi off."
+fi
+echo "$(date) $R" >> $LOG
+termux-notification --id wifitest -t "Wi-Fi off test" -c "$R"; termux-tts-speak "$R"

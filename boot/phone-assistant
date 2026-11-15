@@ -1,0 +1,13 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Termux:Boot script (installed to ~/.termux/boot/). Runs once when the phone boots.
+P="$HOME/phone-assistant"; [ -f "$P/config.sh" ] && . "$P/config.sh"
+echo "== boot script started $(date "+%F %T") (uptime $(cut -d. -f1 /proc/uptime)s)" >> "$P/logs/boot.log"
+termux-wake-lock
+"$P/bin/keepalive" restore
+"$P/bin/keepalive" ensure-daemon
+"$P/bin/keepalive" open-tabs      # one Termux tab per restored session
+# ADB over localhost resets on reboot; this only succeeds if Wireless debugging is on and we're on Wi-Fi.
+"$P/bin/adb-self" >> "$P/logs/boot.log" 2>&1 || \
+  termux-notification --id adb-rearm -t "Phone control needs re-arming" \
+    -c "Turn on Wireless debugging (on Wi-Fi), then tap here." --action "$P/bin/adb-self"
+[ "${ASSISTANT_AUTOSTART:-1}" = 1 ] && "$P/bin/assistant" start >> "$P/logs/boot.log" 2>&1

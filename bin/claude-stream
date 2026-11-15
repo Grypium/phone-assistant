@@ -1,0 +1,111 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""claude-stream REPLY_FILE -- claude -p ARGS...
+
+Runs Claude with streaming output and writes speakable chunks (NUL-terminated) to stdout as soon as each sentence
+is complete, so bin/speak can start talking while Claude is still writing. The prompt comes from stdin.
+The full spoken reply is kept in REPLY_FILE (bin/ask logs it; bin/speak uses it to ignore its own echo).
+If stdout closes (you said "stop"), Claude is killed: a stopped reply shouldn't keep running tools.
+Exit: 0 ok, 1 Claude failed (an apology is spoken instead), 3 interrupted.
+"""
+import json, os, re, select, signal, subprocess, sys, threading
+
+reply_file = sys.argv[1]
+cmd = sys.argv[sys.argv.index("--") + 1:]
+cmd[cmd.index("-p") + 1:cmd.index("-p") + 1] = ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
+open(reply_file, "w").close()
+
+proc = subprocess.Popen(cmd, stdin=sys.stdin, stdout=subprocess.PIPE, cwd=os.environ.get("HOME"),
+                        start_new_session=True, text=True, bufsize=1)
+spoken = []
+
+
+def watch_reader():
+    """bin/speak closed its end (interrupted): stop Claude now, even if it's in the middle of a silent tool call."""
+    p = select.poll(); p.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+    while True:
+        if p.poll(1000):
+            try: os.killpg(proc.pid, signal.SIGTERM)
+            except OSError: pass
+            os._exit(3)
+        if proc.poll() is not None:
+            return
+
+
+threading.Thread(target=watch_reader, daemon=True).start()
+
+
+def clean(s):
+    s = re.sub(r"[*_`#>]", "", s)
+    s = re.sub(r"^\s*(?:[-•]|\d+[.)])\s+", "", s)
+    return " ".join(s.split())
+
+
+def emit(s):
+    s = clean(s)
+    if not re.search(r"[A-Za-z0-9]", s):
+        return
+    spoken.append(s)
+    with open(reply_file, "a") as f:
+        f.write(s + " ")
+    sys.stdout.write(s + "\0"); sys.stdout.flush()
+
+
+SENT_END = re.compile(r"(?<=[.!?])[\"')\]]*\s+|\n+")
+
+
+def take_chunks(buf, final=False):
+    """Split off complete sentences; long ones are split at , ; : after >= 6 words so speech starts sooner."""
+    while True:
+        m = SENT_END.search(buf)
+        if m:
+            emit(buf[:m.end()]); buf = buf[m.end():]; continue
+        words = buf.split()
+        if len(words) > 14:
+            for m in re.finditer(r"[,;:]\s+|\s+-\s+", buf):
+                if len(buf[:m.end()].split()) >= 6:
+                    emit(buf[:m.end()]); buf = buf[m.end():]; break
+            else:
+                break
+            continue
+        break
+    if final and buf.strip():
+        emit(buf); buf = ""
+    return buf
+
+
+buf = ""; ok = False; result_text = ""
+try:
+    for line in proc.stdout:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        t = e.get("type")
+        if t == "stream_event":
+            ev = e.get("event", {})
+            if ev.get("type") == "content_block_delta" and ev.get("delta", {}).get("type") == "text_delta":
+                buf = take_chunks(buf + ev["delta"]["text"])
+            elif ev.get("type") in ("content_block_stop", "message_stop"):
+                buf = take_chunks(buf, final=True)
+        elif t == "result":
+            ok = not e.get("is_error") and e.get("subtype", "success") == "success"
+            result_text = e.get("result") or ""
+    buf = take_chunks(buf, final=True)
+    if ok and not spoken and result_text:      # nothing streamed (shouldn't happen): speak the final result
+        take_chunks(result_text, final=True)
+    rc = proc.wait()
+    if rc != 0 or not ok or not spoken:
+        if not spoken:
+            emit("Sorry, I couldn't reach Claude just now.")
+        sys.exit(1)
+    sys.exit(0)
+except BrokenPipeError:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        sys.stdout = open(os.devnull, "w")
+    except OSError:
+        pass
+    sys.exit(3)

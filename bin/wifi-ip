@@ -1,0 +1,6 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Prints the phone's Wi-Fi IP, or nothing if not on Wi-Fi.
+timeout 10 termux-wifi-connectioninfo 2>/dev/null | python3 -c 'import sys,json
+d=json.load(sys.stdin)
+ip=d.get("ip","")
+print(ip if d.get("supplicant_state")=="COMPLETED" and ip not in ("","0.0.0.0") else "")' 2>/dev/null

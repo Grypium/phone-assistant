@@ -1,0 +1,8 @@
+logs/
+state/
+config.sh
+__pycache__/
+*.pyc
+notes/
+vendor/
+ASSISTANT.local.md
