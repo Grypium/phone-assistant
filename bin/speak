@@ -63,8 +63,7 @@ interrupt(){  # $1 = why (stop|wake), $2 = what was heard
   echo "$(date '+%F %T') interrupted ($1): $2" >> "$P/logs/conversation.log"
 }
 
-chunks(){
-  if [ -n "$STREAM" ]; then cat <&3; return; fi    # already chunked by bin/claude-stream
+split_text(){  # TEXT mode: the reply split into chunks, NUL-terminated
   printf '%s' "$text" | python3 -c '
 import re,sys
 out = []
@@ -83,19 +82,34 @@ for s in out:
     if s.strip(): sys.stdout.write(s.strip() + "\0")'
 }
 
-# the speech engine: one process, one line per chunk; it exits once everything fed to it has been spoken
-FIFO="$S/tts.fifo"; rm -f "$FIFO"; mkfifo "$FIFO"
-termux-tts-speak -s MUSIC < "$FIFO" & tts=$!
-exec 4>"$FIFO"; rm -f "$FIFO"
-( chunks | while IFS= read -r -d '' s; do
-    [ -f "$FLAG" ] && break
-    printf '%s\n' "${s//$'\n'/ }" >&4
-    dbg "chunk: ${s:0:60}"
-  done ) & feed=$!
-exec 4>&-            # only the feeder holds the engine's input now: when it's done, the engine finishes and exits
+# The speech engine: one termux-tts-speak, one line per chunk; it exits once everything fed to it has been spoken.
+# Chunks come from fd 3 (stdin when streaming, else the split text). The feeder reads fd 3 directly (bash reads pipes
+# byte by byte), so if it's killed to restart the engine, no chunk is lost. Fed lines are kept in $LINES for a replay.
+LINES="$S/tts-lines"; : > "$LINES"
+[ -z "$STREAM" ] && { split_text > "$S/tts-chunks"; exec 3<"$S/tts-chunks"; }
+start_engine(){   # $1 = replay: feed the lines from the failed attempt first
+  local fifo="$S/tts.fifo"; rm -f "$fifo"; mkfifo "$fifo"
+  termux-tts-speak -s MUSIC < "$fifo" & tts=$!
+  exec 4>"$fifo"; rm -f "$fifo"
+  ( [ "${1:-}" = replay ] && cat "$LINES" >&4
+    while IFS= read -r -d '' s <&3; do
+      [ -f "$FLAG" ] && break
+      s="${s//$'\n'/ }"; printf '%s\n' "$s" >> "$LINES"; printf '%s\n' "$s" >&4
+      dbg "chunk: ${s:0:60}"
+    done ) & feed=$!
+  exec 4>&-          # only the feeder holds the engine's input: when it's done, the engine finishes and exits
+}
+# Is the phone actually talking? (ADB only; 2 = can't tell)
+tts_playing(){
+  local n; n=$(timeout 4 adb -s localhost:5555 shell "dumpsys audio | grep -c 'state:started.*CONTENT_TYPE_SPEECH'" 2>/dev/null | tr -d '\r')
+  [[ "$n" =~ ^[0-9]+$ ]] || return 2
+  [ "$n" -gt 0 ]
+}
+SPEAKING="$S/speaking"; touch "$SPEAKING"
+start_engine
 
 # the notification's "Stop talking" button
-( while kill -0 "$tts" 2>/dev/null; do
+( while [ -f "$SPEAKING" ]; do
     [ -f "$SHUSH" ] && { interrupt stop "(Stop talking button)"; break; }
     sleep 0.15
   done ) & btn=$!
@@ -106,7 +120,7 @@ if [ $locked != 1 ]; then
   if [ -f "$S/wake.pid" ] && kill -0 "$(cat "$S/wake.pid")" 2>/dev/null && [ ! -f "$S/wake-paused" ]; then
     # the always-on wake listener (already loaded) keeps listening during the reply and flags an interrupt
     rm -f "$S/wake-interrupt"; touch "$S/speaking-wake"
-    ( while kill -0 "$tts" 2>/dev/null; do
+    ( while [ -f "$SPEAKING" ]; do
         [ -f "$S/wake-interrupt" ] && { interrupt wake "${WAKE_MODEL:-hey_jarvis}"; break; }
         sleep 0.15
       done ) & lis=$!
@@ -116,7 +130,7 @@ if [ $locked != 1 ]; then
 else
   # -p streams partial results while you're still talking. Without it the recognizer only answers after a pause,
   # and the reply leaking into the mic means there may be no pause until the current chunk ends.
-  ( while kill -0 "$tts" 2>/dev/null && [ ! -f "$FLAG" ]; do
+  ( while [ -f "$SPEAKING" ] && [ ! -f "$FLAG" ]; do
       timeout 12 termux-speech-to-text -p 2>/dev/null | while IFS= read -r heard; do
         [ -z "${heard// }" ] && continue
         dbg "heard: $heard"
@@ -125,24 +139,45 @@ else
     done ) & lis=$!
 fi
 
-# Wait for the engine to finish. Once interrupted, stop at once (with ADB it's already silent). If the engine hangs
-# (Termux:API sometimes does), give up after a generous estimate of the speaking time and restart Termux:API.
-fed_at=
+# Wait for the engine to finish. Once interrupted, stop at once (with ADB it's already silent).
+# Termux:API's TTS sometimes hangs without a sound. Watchdogs:
+#  - with ADB: speech must actually start within ~5 s of the first chunk; if not, restart Termux:API and the engine
+#    and replay what was fed (once).
+#  - always: give up after a generous estimate of the speaking time once everything has been fed.
+fed_at=; heard_it=; checks=0; tick=0; retried=; can_check=1
 while kill -0 "$tts" 2>/dev/null; do
   if [ -f "$FLAG" ]; then
     [ -f "$SAVED" ] || break                            # silenced: done. Muted instead: let the queue drain
   fi
+  tick=$((tick + 1))
+  if [ -z "$heard_it" ] && [ $can_check = 1 ] && [ -s "$LINES" ] && [ $((tick % 10)) = 0 ]; then
+    tts_playing; r=$?; dbg "speech check: $r (0 playing, 1 silent, 2 can't tell)"
+    if [ $r = 0 ]; then heard_it=1
+    elif [ $r = 2 ]; then can_check=0
+    else
+      checks=$((checks + 1))
+      if [ $checks -ge 5 ]; then
+        if [ -z "$retried" ]; then
+          dbg "no speech 5 s after the first chunk: restarting Termux:API and the engine"
+          retried=1; killtree "$feed"; "$P/bin/heal-api" >/dev/null 2>&1; killtree "$tts"; sleep 0.5
+          start_engine replay; checks=0; fed_at=; continue
+        fi
+        dbg "still no speech after a restart: giving up"; break
+      fi
+    fi
+  fi
   if [ -z "$fed_at" ] && ! kill -0 "$feed" 2>/dev/null; then
-    fed_at=$SECONDS; words=$(reply_so_far | wc -w)
+    fed_at=$SECONDS; words=$(wc -w < "$LINES")
   fi
   if [ -n "$fed_at" ] && [ $((SECONDS - fed_at)) -gt $(( words / 2 + 8 )) ]; then
     dbg "engine hung: restarting Termux:API"; "$P/bin/heal-api"; break
   fi
   sleep 0.1
 done
+rm -f "$SPEAKING"
 killtree "$feed"; exec 3<&- 0</dev/null   # streaming: closing our input makes bin/claude-stream stop Claude
 killtree "$tts"; killtree "$lis"; killtree "$btn"; wait 2>/dev/null; sleep 0.2   # free the recognizer
-rm -f "$S/speaking-wake" "$S/wake-interrupt" "$SHUSH"
+rm -f "$S/speaking-wake" "$S/wake-interrupt" "$SHUSH" "$S/tts-chunks"
 unmute
 if [ -f "$FLAG" ]; then
   why=$(cat "$FLAG"); rm -f "$FLAG"

@@ -5,7 +5,9 @@ Runs Claude with streaming output and writes speakable chunks (NUL-terminated) t
 is complete, so bin/speak can start talking while Claude is still writing. The prompt comes from stdin.
 The full spoken reply is kept in REPLY_FILE (bin/ask logs it; bin/speak uses it to ignore its own echo).
 If stdout closes (you said "stop"), Claude is killed: a stopped reply shouldn't keep running tools.
-Exit: 0 ok, 1 Claude failed (an apology is spoken instead), 3 interrupted.
+A reply that is just <silent> (or empty) speaks nothing: Claude uses it when there's nothing worth saying, e.g. after
+"thanks, that's it".
+Exit: 0 ok (spoken or silent), 1 Claude failed (an apology is spoken instead), 3 interrupted.
 """
 import json, os, re, select, signal, subprocess, sys, threading
 
@@ -40,7 +42,12 @@ def clean(s):
     return " ".join(s.split())
 
 
+SILENT = re.compile(r"(?i)^\W*silent\W*$")
+
+
 def emit(s):
+    if SILENT.match(s):
+        return
     s = clean(s)
     if not re.search(r"[A-Za-z0-9]", s):
         return
@@ -94,7 +101,7 @@ try:
     if ok and not spoken and result_text:      # nothing streamed (shouldn't happen): speak the final result
         take_chunks(result_text, final=True)
     rc = proc.wait()
-    if rc != 0 or not ok or not spoken:
+    if rc != 0 or not ok:
         if not spoken:
             emit("Sorry, I couldn't reach Claude just now.")
         sys.exit(1)

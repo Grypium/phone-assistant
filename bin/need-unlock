@@ -1,0 +1,25 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# need-unlock [SECONDS] — make sure the phone is unlocked before operating its screen (for the voice assistant).
+# If it's locked: wakes the screen, brings up the PIN / fingerprint prompt, buzzes, and waits up to SECONDS (30) for
+# the user to unlock, keeping the screen on meanwhile. Never enters the PIN.
+# Exit 0 = unlocked (already, or within the wait), 1 = still locked, 2 = can't tell (no ADB).
+P="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+A="adb -s localhost:5555 shell"
+"$P/bin/is-locked"; r=$?
+[ $r = 1 ] && { echo "unlocked"; exit 0; }
+[ $r = 2 ] && { echo "can't tell (no ADB)"; exit 2; }
+
+awake(){ $A dumpsys power 2>/dev/null | grep -q 'mWakefulness=Awake'; }
+$A input keyevent KEYCODE_WAKEUP >/dev/null 2>&1
+$A wm dismiss-keyguard >/dev/null 2>&1          # shows the unlock prompt (a secure lock screen stays locked)
+( timeout 5 termux-vibrate -d 250 >/dev/null 2>&1 & )
+echo "$(date '+%F %T') waiting for unlock" >> "$P/logs/conversation.log"
+
+end=$((SECONDS + ${1:-30}))
+while [ $SECONDS -lt $end ]; do
+  sleep 1
+  "$P/bin/is-locked"; [ $? = 1 ] && { echo "unlocked"; exit 0; }
+  awake || $A input keyevent KEYCODE_WAKEUP >/dev/null 2>&1    # screen timed out on the lock screen: light it again
+done
+echo "still locked after ${1:-30}s"
+exit 1

@@ -100,12 +100,32 @@ def audio_ctx(path):
     return max(256, min(1500, (int(dur * 50) + 128 + 63) // 64 * 64))
 
 
+def threads():
+    """whisper's threads spin-wait on each other, so more threads than usable cores is a disaster. With the screen
+    locked (or another app in front) Android moves Termux to its background CPU group: 4 slower cores. 6 threads
+    there took 18.8 s for a command that takes 0.9 s with 4. So: at most 4, and never more than we're allowed."""
+    try:
+        n = len(os.sched_getaffinity(0))
+    except Exception:
+        n = 4
+    return max(1, min(4, n))
+
+
+def cpu_group():
+    try:
+        return open("/proc/self/cpuset").read().strip()
+    except Exception:
+        return "?"
+
+
 def transcribe(path):
+    t0 = time.time(); nt = threads(); grp = cpu_group()
     env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(W, "build", "bin"))
     out = subprocess.run([os.path.join(W, "build", "bin", "whisper-cli"), "-m",
-                          os.path.join(W, "models", f"ggml-{MODEL}.bin"), "-f", path, "-t", "6",
+                          os.path.join(W, "models", f"ggml-{MODEL}.bin"), "-f", path, "-t", str(nt),
                           "-ac", str(audio_ctx(path)), "-nt", "-np", "-l", "en"],
                          capture_output=True, text=True, env=env).stdout
+    log(f"whisper: {time.time() - t0:.1f}s, {nt} threads, cpu group {grp}")
     text = " ".join(out.split())
     text = re.sub(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*", "", text).strip()     # [BLANK_AUDIO], (wind), *music*
     if re.fullmatch(r"(?i)(thank you\.?|thanks for watching!?|you|\.|)", text):

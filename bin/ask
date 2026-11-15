@@ -9,22 +9,23 @@ L="$P/logs"; S="$P/state"; mkdir -p "$L" "$S"
 MODEL="${ASSISTANT_MODEL:-sonnet}"
 SESSION_IDLE=1800   # start a fresh conversation after 30 min of quiet
 
-exec 9>"$S/ask.lock"; flock -n 9 || { termux-toast "Already listening" 2>/dev/null; exit 0; }
+exec 9>"$S/ask.lock"; flock -n 9 || { timeout 5 termux-toast "Already listening" 2>/dev/null; exit 0; }
 touch "$S/busy"; trap 'rm -f "$S/busy"' EXIT
 audio=; [ "$1" = --audio ] && { audio="$2"; shift 2; }
 [ -z "$audio" ] && [ -z "$*" ] && pgrep -x parec >/dev/null && sleep 0.5   # let the wake listener release the mic
 
 log(){ echo "$(date '+%F %T') $*" >> "$L/conversation.log"; }
 # The notification takes ~0.5 s to update: do it in the background, in order, never in the way.
-status(){ ( flock 8; "$P/bin/assistant" notify "$1" >/dev/null 2>&1 ) 8>"$S/notify.lock" & }
+# 9>&-: background jobs must not inherit the ask lock, or it stays held after ask exits.
+status(){ ( flock 8; timeout 10 "$P/bin/assistant" notify "$1" >/dev/null 2>&1 ) 8>"$S/notify.lock" 9>&- & }
 ack(){   # tell the user we're listening: ASSISTANT_ACK = chime (default) | voice | vibrate | off
   case "${ASSISTANT_ACK:-chime}" in
     off) ;;
     vibrate) termux-vibrate -d 70 -f >/dev/null 2>&1 ;;
     voice) termux-tts-speak -s MUSIC "${ASSISTANT_ACK_TEXT:-Yes?}" ;;
-    *) termux-vibrate -d 50 -f >/dev/null 2>&1 &
+    *) timeout 5 termux-vibrate -d 50 -f >/dev/null 2>&1 9>&- &   # not waited for: if Termux:API is stuck, don't hang here
        { pulseaudio --check || pulseaudio --start --exit-idle-time=-1; } 2>/dev/null
-       paplay "$P/assets/listening.wav" 2>/dev/null; wait ;;
+       paplay "$P/assets/listening.wav" 2>/dev/null ;;
   esac
 }
 listen(){
@@ -70,6 +71,9 @@ for turn in 1 2 3 4 5 6; do
   elif ls "$HOME"/.claude/projects/*/"$(cat "$S/session-id").jsonl" >/dev/null 2>&1; then
     sess=(--resume "$(cat "$S/session-id")"); date +%s > "$S/last-ask"
   fi                                      # (interrupted before Claude saved anything: keep --session-id)
+  if [ -z "$reply" ] && [ "$crc" = 0 ] && [ "$rc" = 0 ]; then   # nothing to say (<silent>): just a buzz
+    log "CLAUDE: (silent)"; timeout 5 termux-vibrate -d 60 >/dev/null 2>&1 9>&- & break
+  fi
   log "CLAUDE: $reply"; status "🗣 $reply"
   [ $rc = 10 ] && { status "Stopped"; break; }   # you said "stop"
   [ $rc = 11 ] && { text=""; continue; }         # you said the wake word over it: listen for the new request

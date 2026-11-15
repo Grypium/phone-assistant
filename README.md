@@ -82,6 +82,8 @@ Settings live in `config.sh` (created from `config.example.sh`).
   - Never force-stop the TTS engine (TTS hangs afterwards) and never run two `termux-tts-speak` at once (both hang).
   - "Is it talking?": `adb shell dumpsys audio | grep 'state:started.*CONTENT_TYPE_SPEECH'`.
 - `bin/is-locked` — lock state via ADB (0 locked, 1 unlocked, 2 unknown).
+- `bin/need-unlock` — used by Claude before touching the screen: wakes it, shows the unlock prompt, buzzes, waits
+  30 s for you to unlock (exit 0 unlocked, 1 still locked). Claude says "please unlock…" first, or "ping me again" if not.
 - `bin/wake-listener.py` — always-on wake word, then records the request (releases the mic while `ask` runs, except
   during a reply on a locked phone): PulseAudio OpenSL ES mic → ffmpeg 16 kHz → openWakeWord + Silero VAD
   (about 3% of one core). Default wake word "Hey Jarvis" (pretrained); custom "Hey Claude" is a TODO.
@@ -138,10 +140,11 @@ Settings live in `config.sh` (created from `config.example.sh`).
 install.sh            setup (idempotent)
 setup.sh              one-command bootstrap for a fresh Termux (repo + Claude Code, then hands off to Claude)
 CLAUDE.md             setup instructions Claude follows
+CHANGELOG.md          what changed
 config.example.sh     settings template → config.sh
 ASSISTANT.md          Claude's voice-assistant instructions (+ your own ASSISTANT.local.md, not in git)
 bin/                  ask, assistant, wake-listener.py, hear, speak, claude-stream, keepalive, claude-args,
-                      adb-self, wifi-ip, is-locked, heal-api, shush, wait-wake
+                      adb-self, wifi-ip, is-locked, need-unlock, heal-api, shush, wait-wake
 assets/               chimes
 vendor/               whisper.cpp (cloned and built by install.sh, not in git)
 shell/                termux-init.sh (bashrc hook), tmux.conf
